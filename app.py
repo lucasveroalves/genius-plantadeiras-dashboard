@@ -1,182 +1,195 @@
 """
-app.py — Genius Plantadeiras v13
-  • Persistência completa via Supabase
-  • Aba ⚙️ Admin (apenas para admins) — gerenciar usuários e senhas
-  • Planilha de peças persiste entre reinicializações
+app.py — Genius Plantadeiras v14
+• Abas controladas por permissão (admin define por usuário)
+• Comercial → tudo; PCP → PCP + Curva ABC de Peças
+• KPIs de peças incluem orçamentos em aberto
+• Auto-refresh 30 s propaga alterações para todos os usuários
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import date
 
-from auth import tela_login, painel_usuario, render_painel_admin, is_admin
+from auth import tela_login, painel_usuario, render_painel_admin, is_admin, abas_permitidas
 from data.loader import preparar_pecas, calcular_kpis_pecas, calcular_curva_abc
-from components.ui import (
-    render_header, render_sidebar_uploads,
-    render_banner_mock_pecas, render_auto_refresh,
-)
-from components.estoque import render_aba_estoque
-from components.producao import render_aba_pcp
-from components.forms import (
-    render_formulario_negociacao,
-    render_formulario_orcamento_pecas,
-    render_formulario_revendas,
-)
-from components.nf_demo import render_aba_nf_demo
+from components.ui import render_header, render_sidebar_uploads, render_banner_mock_pecas, render_auto_refresh
+from components.estoque   import render_aba_estoque
+from components.producao  import render_aba_pcp
+from components.forms     import render_formulario_negociacao, render_formulario_orcamento_pecas, render_formulario_revendas
+from components.nf_demo   import render_aba_nf_demo
+from data.db              import ler_orcamentos
 
-# ── Configuração Base ─────────────────────────────────────────
+# ── Configuração ──────────────────────────────────────────────
 st.set_page_config(page_title="Genius Plantadeiras", layout="wide", page_icon="🌾")
 
 # ── 1. Autenticação ───────────────────────────────────────────
 if not tela_login():
     st.stop()
 
-# ── 2. Sidebar e Upload ───────────────────────────────────────
+# ── 2. Sidebar ────────────────────────────────────────────────
 painel_usuario()
 _peca_file = render_sidebar_uploads()
 
-# ── 3. Carregamento de Peças ──────────────────────────────────
+# ── 3. Dados de Peças ─────────────────────────────────────────
 df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
 
-# ── 4. UI Superior ────────────────────────────────────────────
+# ── 4. Header + Auto-refresh ──────────────────────────────────
 render_header()
 render_auto_refresh()
 
-# ── 5. Abas ──────────────────────────────────────────────────
-_abas_base = [
-    "📝 Lançar Orçamento de Peças",
-    "🏬 Revendas",
-    "➕ Lançar Orçamento de Máquina",
-    "⚙️ PCP",
-    "📦 Estoque de Máquinas",
-    "📄 NF em Demonstração",
-    "🔧 Peças",
-]
+# ── 5. Define abas visíveis para este usuário ─────────────────
+MAPA = {
+    "📝 Orçamento de Peças":   lambda: render_formulario_orcamento_pecas(),
+    "🏬 Revendas":             lambda: render_formulario_revendas(),
+    "➕ Orçamento de Máquina": lambda: render_formulario_negociacao(),
+    "⚙️ PCP":                  lambda: render_aba_pcp(),
+    "📦 Estoque de Máquinas":  lambda: render_aba_estoque(),
+    "📄 NF em Demonstração":   lambda: render_aba_nf_demo(),
+    "🔧 Peças":                lambda: _render_aba_pecas(df_pecas, is_mock_pecas),
+}
+
+permitidas = abas_permitidas()
+abas_visiveis = [a for a in MAPA if a in permitidas]
+
 if is_admin():
-    _abas_base.append("👤 Admin")
+    abas_visiveis.append("👤 Admin")
 
-abas = st.tabs(_abas_base)
+tabs = st.tabs(abas_visiveis)
 
-with abas[0]:
-    render_formulario_orcamento_pecas()
+for tab, nome in zip(tabs, abas_visiveis):
+    with tab:
+        if nome == "👤 Admin":
+            render_painel_admin()
+        else:
+            MAPA[nome]()
 
-with abas[1]:
-    render_formulario_revendas()
 
-with abas[2]:
-    render_formulario_negociacao()
+# ══════════════════════════════════════════════════════════════
+# ABA PEÇAS — acesso para Comercial (completo) e PCP (Curva ABC)
+# ══════════════════════════════════════════════════════════════
 
-with abas[3]:
-    render_aba_pcp()
+def _render_aba_pecas(df_pecas, is_mock_pecas):
+    perfil = st.session_state.get("perfil_atual","comercial")
 
-with abas[4]:
-    render_aba_estoque()
-
-with abas[5]:
-    render_aba_nf_demo()
-
-with abas[6]:
     if is_mock_pecas:
         render_banner_mock_pecas()
+        return
+
+    st.header("🔧 Análise de Peças")
+
+    # ── Filtro de Período ──────────────────────────────────────
+    col_f1, col_f2 = st.columns([4,1])
+    with col_f1:
+        data_min = df_pecas["Data_Venda"].min().date() if not df_pecas.empty else date.today()
+        data_max = df_pecas["Data_Venda"].max().date() if not df_pecas.empty else date.today()
+        # Sem timezone nos limites do date_input
+        intervalo = st.date_input("Selecione o período", value=(data_min, data_max),
+                                   min_value=data_min, max_value=data_max,
+                                   format="DD/MM/YYYY", key="peca_periodo")
+    with col_f2:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Aplicar", key="peca_btn_filtro"):
+            st.rerun()
+
+    # Aplica filtro
+    if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
+        d0, d1 = intervalo
+        dv = df_pecas["Data_Venda"]
+        # Remove timezone se houver
+        if hasattr(dv.dt, "tz") and dv.dt.tz is not None:
+            dv = dv.dt.tz_localize(None)
+        df_filtrado = df_pecas[(dv.dt.date >= d0) & (dv.dt.date <= d1)]
     else:
-        st.header("🔧 Análise de Peças")
+        df_filtrado = df_pecas
 
-        col_filtro1, col_filtro2 = st.columns([4, 1])
-        with col_filtro1:
-            data_min = df_pecas["Data_Venda"].min().date() if not df_pecas.empty else date.today()
-            data_max = df_pecas["Data_Venda"].max().date() if not df_pecas.empty else date.today()
-            intervalo = st.date_input(
-                "Selecione o período",
-                value=(data_min, data_max),
-                min_value=data_min, max_value=data_max,
-                format="DD/MM/YYYY", key="peca_periodo",
-            )
-        with col_filtro2:
-            st.write("")
-            st.write("")
-            if st.button("🔄 Aplicar Filtro", key="peca_btn_filtro"):
-                st.rerun()
+    # ── Orçamentos de Peças (para KPI "Em Orçamento") ──────────
+    df_orc = ler_orcamentos()
+    pecas_em_orc = 0.0
+    if not df_orc.empty and "Status_Orc" in df_orc.columns:
+        mask = df_orc["Status_Orc"].isin(["Aguardando"])
+        pecas_em_orc = pd.to_numeric(df_orc.loc[mask,"Valor_Total"], errors="coerce").fillna(0).sum()
 
-        if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
-            data_inicio, data_fim = intervalo
-            df_filtrado = df_pecas[
-                (df_pecas["Data_Venda"].dt.date >= data_inicio) &
-                (df_pecas["Data_Venda"].dt.date <= data_fim)
-            ]
-        else:
-            df_filtrado = df_pecas
+    # ── KPIs (comercial vê tudo; PCP vê resumido) ──────────────
+    kpis = calcular_kpis_pecas(df_filtrado)
 
-        from data.db import ler_orcamentos
-        df_orc = ler_orcamentos()
-        kpis   = calcular_kpis_pecas(df_filtrado)
+    def _brl(v):
+        try:
+            v = float(v)
+            return f"R$ {int(v):,}".replace(",",".") + f",{v:.2f}".split(".")[1]
+        except Exception:
+            return "R$ 0,00"
 
-        pecas_em_orcamento = 0.0
-        if not df_orc.empty and "Status_Orc" in df_orc.columns and "Valor_Total" in df_orc.columns:
-            mask_orc = df_orc["Status_Orc"].isin(["Em Orçamento", "Aguardando"])
-            pecas_em_orcamento = pd.to_numeric(
-                df_orc.loc[mask_orc, "Valor_Total"], errors="coerce"
-            ).fillna(0).sum()
+    def _card(label, value):
+        st.markdown(
+            f'<div style="background:#1F2937;border:1px solid #2D3748;'
+            f'border-left:4px solid #E36C2C;border-radius:10px;'
+            f'padding:14px 16px 10px;min-height:80px;">'
+            f'<div style="font-size:11px;font-weight:700;color:#6A7A8A;'
+            f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">{label}</div>'
+            f'<div style="font-size:1.35rem;font-weight:700;color:#F0F4F8;'
+            f'word-break:break-word;">{value}</div></div>',
+            unsafe_allow_html=True)
 
-        def _brl(v):
-            try:
-                v = float(v)
-                inteiro  = f"{int(v):,}".replace(",", ".")
-                centavos = f"{v:.2f}".split(".")[1]
-                return f"R$ {inteiro},{centavos}"
-            except Exception:
-                return "R$ 0,00"
-
-        def _kpi_card(label, value):
-            st.markdown(
-                f'<div style="background:#1F2937;border:1px solid #2D3748;'
-                f'border-left:4px solid #E36C2C;border-radius:10px;'
-                f'padding:14px 16px 10px;min-height:80px;">'
-                f'<div style="font-size:11px;font-weight:700;color:#6A7A8A;'
-                f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">{label}</div>'
-                f'<div style="font-size:1.45rem;font-weight:700;color:#F0F4F8;'
-                f'line-height:1.2;word-break:break-word;">{value}</div></div>',
-                unsafe_allow_html=True,
-            )
-
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1: _kpi_card("💰 Peças Faturadas",      _brl(kpis["total_faturado"]))
-        with col2: _kpi_card("📋 Em Orçamento",         _brl(pecas_em_orcamento))
-        with col3: _kpi_card("📦 Volume de Itens",      f"{int(kpis['volume_itens']):,}".replace(",", "."))
-        with col4: _kpi_card("🎟️ Ticket Médio / Venda", _brl(kpis["ticket_medio"]))
-        with col5: _kpi_card("🏷️ SKUs Ativos",          f"{kpis['qtd_skus']:,}".replace(",", "."))
-
+    if perfil == "comercial":
+        c1,c2,c3,c4,c5 = st.columns(5)
+        with c1: _card("💰 Peças Faturadas",      _brl(kpis["total_faturado"]))
+        with c2: _card("📋 Em Orçamento",         _brl(pecas_em_orc))
+        with c3: _card("📦 Volume de Itens",      f"{int(kpis['volume_itens']):,}".replace(",","."))
+        with c4: _card("🎟️ Ticket Médio",         _brl(kpis["ticket_medio"]))
+        with c5: _card("🏷️ SKUs Ativos",          str(kpis["qtd_skus"]))
+        st.divider()
+    else:
+        # PCP vê apenas o status inicial e curva ABC
+        c1, c2 = st.columns(2)
+        with c1: _card("📦 Volume de Itens", f"{int(kpis['volume_itens']):,}".replace(",","."))
+        with c2: _card("🏷️ SKUs Ativos",    str(kpis["qtd_skus"]))
         st.divider()
 
-        from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
+    # ── Curva ABC (visível para todos) ─────────────────────────
+    from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
+
+    df_abc = calcular_curva_abc(df_filtrado, top_n=12)
+
+    if perfil == "comercial":
         col_abc, col_rev = st.columns(2)
         with col_abc:
             st.subheader("📊 Curva ABC – Peças Mais Vendidas")
-            df_abc = calcular_curva_abc(df_filtrado, top_n=12)
             if not df_abc.empty:
                 st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
             else:
-                st.info("Sem dados para exibir a Curva ABC.")
+                st.info("Sem dados para Curva ABC.")
         with col_rev:
-            st.subheader("🏆 Top 10 Revendas – Consumo de Peças")
+            st.subheader("🏆 Top 10 Revendas")
             if not df_filtrado.empty:
-                st.plotly_chart(grafico_ranking_revendas_pecas(df_filtrado, top_n=10),
-                                use_container_width=True)
+                st.plotly_chart(grafico_ranking_revendas_pecas(df_filtrado, top_n=10), use_container_width=True)
             else:
-                st.info("Sem dados para o ranking de revendas.")
+                st.info("Sem dados de revendas.")
+    else:
+        # PCP: curva ABC em largura total + status dos orçamentos
+        st.subheader("📊 Curva ABC – Previsão de Estoque Mínimo de Peças")
+        if not df_abc.empty:
+            st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
+        else:
+            st.info("Sem dados para Curva ABC.")
 
+        # Orçamentos em aberto para o PCP ter visão de demanda
+        if not df_orc.empty:
+            st.divider()
+            st.subheader("📋 Orçamentos de Peças em Aberto")
+            df_orc_view = df_orc[df_orc["Status_Orc"] == "Aguardando"][
+                ["Nr_Pedido","Data_Orcamento","Cliente_Revenda","Valor_Total","Status_Orc"]
+            ] if "Status_Orc" in df_orc.columns else df_orc
+            st.dataframe(df_orc_view, use_container_width=True, height=300)
+
+    if perfil == "comercial":
         st.divider()
         st.subheader("📋 Detalhamento de Vendas (Peças)")
         cols_fmt = {}
         if "Valor_Unitario" in df_filtrado.columns:
             cols_fmt["Valor_Unitario"] = "R$ {:,.2f}".format
         if "Valor_Total" in df_filtrado.columns:
-            cols_fmt["Valor_Total"] = "R$ {:,.2f}".format
+            cols_fmt["Valor_Total"]    = "R$ {:,.2f}".format
         st.dataframe(
             df_filtrado.style.format(cols_fmt) if cols_fmt else df_filtrado,
-            use_container_width=True, height=400,
-        )
-
-# ── Aba Admin (visível apenas para admins) ────────────────────
-if is_admin() and len(abas) >= 8:
-    with abas[7]:
-        render_painel_admin()
+            use_container_width=True, height=400)

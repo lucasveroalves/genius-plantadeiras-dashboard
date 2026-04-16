@@ -1,16 +1,18 @@
 """
-components/nf_demo.py — Genius Plantadeiras v13
-Persistência via Supabase (genius_nf_demo).
+components/nf_demo.py — Genius Plantadeiras v14
+• Persistência via Supabase
+• Botão "Enviar Notificações" envia e-mail para NFs que vencem em ≤15 dias
+  (usa SMTP configurado nos secrets)
 """
 
 from __future__ import annotations
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
-from data.db import ler_nfs, adicionar_nf, excluir_nf
+from data.db import ler_nfs, adicionar_nf, excluir_nf, enviar_email_nf
 
 VALIDADE_DIAS = 60
-ALERTA_DIAS   = 10
+ALERTA_DIAS   = 15   # avisa com 15 e 10 dias
 
 _CSS = """
 <style>
@@ -27,166 +29,179 @@ _CSS = """
 """
 
 
-def _dias_restantes(data_emissao_str: str) -> int:
+def _dias(data_str: str) -> int:
     try:
-        emissao    = pd.to_datetime(data_emissao_str, dayfirst=True).date()
-        vencimento = emissao + timedelta(days=VALIDADE_DIAS)
-        return (vencimento - date.today()).days
+        emissao = pd.to_datetime(data_str, dayfirst=True).date()
+        return (emissao + timedelta(days=VALIDADE_DIAS) - date.today()).days
     except Exception:
         return 9999
 
-
-def _status_nf(dias: int) -> dict:
-    if dias < 0:
-        return {"label": "VENCIDA", "dot": "#E84040", "text": "#E87878",
-                "bg": "rgba(232,64,64,.10)", "border": "rgba(232,64,64,.4)"}
-    if dias <= ALERTA_DIAS:
-        return {"label": "ATENÇÃO", "dot": "#E8A020", "text": "#E8C040",
-                "bg": "rgba(232,160,32,.10)", "border": "rgba(232,160,32,.4)"}
-    return     {"label": "OK",      "dot": "#3D9970", "text": "#52B788",
-                "bg": "rgba(61,153,112,.10)", "border": "rgba(61,153,112,.4)"}
-
-
-def _badge(dias: int) -> str:
-    s = _status_nf(dias)
-    return (f'<span style="background:{s["bg"]};border:1px solid {s["border"]};'
-            f'color:{s["text"]};border-radius:20px;padding:3px 10px;'
-            f'font-size:12px;font-weight:700;">'
-            f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
-            f'background:{s["dot"]};margin-right:5px;vertical-align:middle;"></span>'
-            f'{s["label"]}</span>')
-
-
-def _vencimento_str(data_emissao_str: str) -> str:
+def _venc_str(data_str: str) -> str:
     try:
-        emissao = pd.to_datetime(data_emissao_str, dayfirst=True).date()
-        return (emissao + timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y")
+        return (pd.to_datetime(data_str, dayfirst=True).date() + timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y")
     except Exception:
         return "—"
 
+def _badge(dias: int) -> str:
+    if dias < 0:
+        return ('<span style="background:rgba(232,64,64,.10);border:1px solid rgba(232,64,64,.4);'
+                'color:#E87878;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:700;">'
+                '🔴 VENCIDA</span>')
+    if dias <= 10:
+        return ('<span style="background:rgba(232,64,64,.10);border:1px solid rgba(232,64,64,.4);'
+                'color:#E87878;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:700;">'
+                f'🟠 {dias}d CRÍTICO</span>')
+    if dias <= ALERTA_DIAS:
+        return ('<span style="background:rgba(232,160,32,.10);border:1px solid rgba(232,160,32,.4);'
+                'color:#E8C040;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:700;">'
+                f'⚠️ {dias}d</span>')
+    return ('<span style="background:rgba(61,153,112,.10);border:1px solid rgba(61,153,112,.4);'
+            'color:#52B788;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:700;">'
+            f'✅ {dias}d</span>')
+
 
 def _painel_alertas(lista: list):
-    proximas = [nf for nf in lista
-                if _dias_restantes(nf.get("Data_Emissao", "")) <= ALERTA_DIAS]
-    vencidas  = [nf for nf in proximas if _dias_restantes(nf.get("Data_Emissao", "")) < 0]
-    a_vencer  = [nf for nf in proximas if _dias_restantes(nf.get("Data_Emissao", "")) >= 0]
+    proximas = [nf for nf in lista if _dias(nf.get("Data_Emissao","")) <= ALERTA_DIAS]
     if not proximas:
         return
     st.markdown("### ⚠️ Alertas de Vencimento")
-    for nf in vencidas:
-        dias = _dias_restantes(nf.get("Data_Emissao", ""))
+    for nf in proximas:
+        dias = _dias(nf.get("Data_Emissao",""))
+        css  = "alerta-vencida" if dias < 0 else "alerta-vence"
+        ico  = "🔴" if dias < 0 else ("🟠" if dias <= 10 else "🟡")
+        msg  = f"{abs(dias)} dia(s) em atraso" if dias < 0 else f"{dias} dia(s) restante(s)"
+        cor  = "#E87878" if dias < 0 else "#E8C040"
         st.markdown(
-            f'<div class="alerta-card alerta-vencida">'
-            f'<span style="font-size:22px;">🔴</span><div>'
-            f'<div style="font-weight:700;color:#E87878;font-size:14px;">'
+            f'<div class="alerta-card {css}"><span style="font-size:22px;">{ico}</span><div>'
+            f'<div style="font-weight:700;color:{cor};font-size:14px;">'
             f'NF {nf.get("Nr_NF","—")} — {nf.get("Cliente","—")} — {nf.get("Maquina","—")}</div>'
             f'<div style="color:#A8B8CC;font-size:12px;margin-top:3px;">'
-            f'Emitida em {nf.get("Data_Emissao","—")} · Venceu em {_vencimento_str(nf.get("Data_Emissao",""))} '
-            f'<strong style="color:#E84040;">({abs(dias)} dia(s) em atraso)</strong>'
-            f'</div></div></div>', unsafe_allow_html=True)
-    for nf in a_vencer:
-        dias = _dias_restantes(nf.get("Data_Emissao", ""))
-        st.markdown(
-            f'<div class="alerta-card alerta-vence">'
-            f'<span style="font-size:22px;">🟡</span><div>'
-            f'<div style="font-weight:700;color:#E8C040;font-size:14px;">'
-            f'NF {nf.get("Nr_NF","—")} — {nf.get("Cliente","—")} — {nf.get("Maquina","—")}</div>'
-            f'<div style="color:#A8B8CC;font-size:12px;margin-top:3px;">'
-            f'Emitida em {nf.get("Data_Emissao","—")} · Vence em {_vencimento_str(nf.get("Data_Emissao",""))} '
-            f'<strong style="color:#E8A020;">({dias} dia(s) restante(s))</strong>'
-            f'</div></div></div>', unsafe_allow_html=True)
-    st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">',
-                unsafe_allow_html=True)
+            f'Emitida {nf.get("Data_Emissao","—")} · Vence {_venc_str(nf.get("Data_Emissao",""))} '
+            f'<strong style="color:{cor};">({msg})</strong></div></div></div>',
+            unsafe_allow_html=True)
+    st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">', unsafe_allow_html=True)
 
 
 def _kpis(lista: list):
-    total    = len(lista)
-    ok       = sum(1 for nf in lista if _dias_restantes(nf.get("Data_Emissao","")) > ALERTA_DIAS)
-    atencao  = sum(1 for nf in lista if 0 <= _dias_restantes(nf.get("Data_Emissao","")) <= ALERTA_DIAS)
-    vencidas = sum(1 for nf in lista if _dias_restantes(nf.get("Data_Emissao","")) < 0)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📄 Total de NFs",    total)
-    c2.metric("✅ Em dia",           ok)
-    c3.metric("⚠️ Vencem em breve", atencao)
-    c4.metric("🔴 Vencidas",        vencidas)
+    total   = len(lista)
+    ok      = sum(1 for nf in lista if _dias(nf.get("Data_Emissao","")) > ALERTA_DIAS)
+    aten    = sum(1 for nf in lista if 0 <= _dias(nf.get("Data_Emissao","")) <= ALERTA_DIAS)
+    venc    = sum(1 for nf in lista if _dias(nf.get("Data_Emissao","")) < 0)
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("📄 Total NFs",    total)
+    c2.metric("✅ Em dia",        ok)
+    c3.metric("⚠️ Vencem breve", aten)
+    c4.metric("🔴 Vencidas",     venc)
+
+
+def _enviar_notificacoes(lista: list):
+    """Envia e-mail para NFs que vencem em ≤15 dias ou já vencidas."""
+    try:
+        email_destino = st.secrets.get("email",{}).get("notificacao_para","")
+    except Exception:
+        email_destino = ""
+
+    if not email_destino:
+        st.warning("Configure `email.notificacao_para` nos Secrets para receber notificações.")
+        return
+
+    proximas = [nf for nf in lista if _dias(nf.get("Data_Emissao","")) <= ALERTA_DIAS]
+    if not proximas:
+        st.info("Nenhuma NF com vencimento próximo — nada a notificar.")
+        return
+
+    linhas_html = ""
+    for nf in proximas:
+        dias = _dias(nf.get("Data_Emissao",""))
+        status = "VENCIDA" if dias < 0 else f"Vence em {dias} dia(s)"
+        cor    = "#E84040" if dias < 0 else ("#E8A020" if dias <= 10 else "#E8C040")
+        linhas_html += (
+            f'<tr><td style="padding:6px 10px;color:#EEF2F8;">{nf.get("Nr_NF","—")}</td>'
+            f'<td style="padding:6px 10px;color:#A8B8CC;">{nf.get("Cliente","—")}</td>'
+            f'<td style="padding:6px 10px;color:#A8B8CC;">{nf.get("Maquina","—")}</td>'
+            f'<td style="padding:6px 10px;">{_venc_str(nf.get("Data_Emissao",""))}</td>'
+            f'<td style="padding:6px 10px;font-weight:700;color:{cor};">{status}</td></tr>'
+        )
+
+    corpo = f"""
+<div style="font-family:sans-serif;background:#111827;padding:24px;border-radius:12px;">
+  <h2 style="color:#E36C2C;">🌾 Genius Plantadeiras — Alerta NF em Demonstração</h2>
+  <p style="color:#A8B8CC;">As seguintes NFs em demonstração estão próximas do vencimento ou já vencidas:</p>
+  <table style="width:100%;border-collapse:collapse;background:#1F2937;border-radius:8px;overflow:hidden;">
+    <thead>
+      <tr style="background:#2D3748;">
+        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Nº NF</th>
+        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Cliente</th>
+        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Máquina</th>
+        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Vencimento</th>
+        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Status</th>
+      </tr>
+    </thead>
+    <tbody>{linhas_html}</tbody>
+  </table>
+  <p style="color:#6A7A8A;font-size:12px;margin-top:16px;">
+    Acesse o dashboard para mais detalhes.<br>
+    <em>Genius Plantadeiras — Sistema de Gestão v14</em>
+  </p>
+</div>"""
+
+    if enviar_email_nf(email_destino, "⚠️ Alerta — NFs em Demonstração próximas do vencimento", corpo):
+        st.success(f"✅ Notificação enviada para {email_destino} ({len(proximas)} NF(s)).")
+    else:
+        st.error("Falha ao enviar. Verifique as configurações de e-mail nos Secrets.")
 
 
 def _formulario():
-    st.markdown('<div class="nf-sec">➕ Lançar Nova NF em Demonstração</div>',
-                unsafe_allow_html=True)
-    with st.form(key="form_nf_demo", clear_on_submit=True):
+    st.markdown('<div class="nf-sec">➕ Lançar Nova NF em Demonstração</div>', unsafe_allow_html=True)
+    with st.form("form_nf_demo", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
-            data_emissao = st.date_input("Data de Emissão da NF", value=date.today(),
-                                         format="DD/MM/YYYY", key="nf_emissao")
-            nr_nf = st.text_input("Número da NF", placeholder="Ex: 001234", key="nf_nr")
+            data_emissao = st.date_input("Data de Emissão", value=date.today(), format="DD/MM/YYYY")
+            nr_nf        = st.text_input("Número da NF", placeholder="Ex: 001234")
         with col2:
-            cliente = st.text_input("Cliente / Revenda",
-                                    placeholder="Nome do cliente ou revenda", key="nf_cliente")
-            maquina = st.text_input("Máquina / Equipamento",
-                                    placeholder="Ex: GATA 18050 — GS-11688", key="nf_maquina")
-        obs = st.text_area("Observações (opcional)", placeholder="Informações adicionais...",
-                           height=70, key="nf_obs")
-        submitted = st.form_submit_button("💾 Salvar NF em Demonstração", type="primary")
-
-        if submitted:
-            if not nr_nf.strip():
-                st.toast("⚠️ Número da NF é obrigatório.", icon="🚫")
-            elif not cliente.strip():
-                st.toast("⚠️ Cliente é obrigatório.", icon="🚫")
-            elif not maquina.strip():
-                st.toast("⚠️ Máquina é obrigatória.", icon="🚫")
+            cliente  = st.text_input("Cliente / Revenda", placeholder="Nome do cliente")
+            maquina  = st.text_input("Máquina / Equipamento", placeholder="Ex: GATA 18050 — GS-11688")
+        obs = st.text_area("Observações (opcional)", height=70)
+        sub = st.form_submit_button("💾 Salvar NF em Demonstração", type="primary")
+        if sub:
+            if not nr_nf.strip(): st.toast("⚠️ Número da NF obrigatório.", icon="🚫")
+            elif not cliente.strip(): st.toast("⚠️ Cliente obrigatório.", icon="🚫")
+            elif not maquina.strip(): st.toast("⚠️ Máquina obrigatória.", icon="🚫")
             else:
-                reg = {
-                    "Data_Emissao": data_emissao.strftime("%d/%m/%Y"),
-                    "Nr_NF":        nr_nf.strip(),
-                    "Cliente":      cliente.strip(),
-                    "Maquina":      maquina.strip(),
-                    "Observacoes":  obs.strip(),
-                }
+                reg = {"Data_Emissao": data_emissao.strftime("%d/%m/%Y"),
+                       "Nr_NF": nr_nf.strip(), "Cliente": cliente.strip(),
+                       "Maquina": maquina.strip(), "Observacoes": obs.strip()}
                 if adicionar_nf(reg):
                     vence = (data_emissao + timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y")
-                    st.toast(f"✅ NF {nr_nf.strip()} salva! Vence em {vence}.", icon="✅")
+                    st.toast(f"✅ NF {nr_nf.strip()} salva! Vence {vence}.", icon="✅")
                     st.rerun()
 
 
 def _tabela(lista: list):
     if not lista:
-        st.info("Nenhuma NF em demonstração cadastrada.")
+        st.info("Nenhuma NF cadastrada.")
         return
     st.markdown('<div class="nf-sec">📋 NFs em Demonstração</div>', unsafe_allow_html=True)
 
-    cols_w = [0.9, 1.0, 2.0, 2.5, 1.0, 1.0, 1.2, 0.5]
+    cols_w = [0.9, 1.0, 2.0, 2.5, 1.0, 1.2, 0.5]
     hdr = st.columns(cols_w)
-    for col, lbl in zip(hdr, ["Nº NF","Emissão","Cliente","Máquina","Vencimento","Restam","Status",""]):
-        col.markdown(f'<div class="nf-tbl-hdr">{lbl}</div>', unsafe_allow_html=True)
+    for c, lbl in zip(hdr, ["Nº NF","Emissão","Cliente","Máquina","Vencimento","Status",""]):
+        c.markdown(f'<div class="nf-tbl-hdr">{lbl}</div>', unsafe_allow_html=True)
 
     for nf in lista:
-        dias     = _dias_restantes(nf.get("Data_Emissao", ""))
-        venc_str = _vencimento_str(nf.get("Data_Emissao", ""))
-        row_id   = nf.get("id")
-        cols     = st.columns(cols_w)
-
+        dias   = _dias(nf.get("Data_Emissao",""))
+        row_id = nf.get("id")
+        cols   = st.columns(cols_w)
         cols[0].markdown(f'<div style="font-size:13px;color:#EEF2F8;font-weight:600;padding-top:8px;">{nf.get("Nr_NF","—")}</div>', unsafe_allow_html=True)
         cols[1].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{nf.get("Data_Emissao","—")}</div>', unsafe_allow_html=True)
         cols[2].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{nf.get("Cliente","—")}</div>', unsafe_allow_html=True)
         cols[3].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{nf.get("Maquina","—")}</div>', unsafe_allow_html=True)
-        cols[4].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{venc_str}</div>', unsafe_allow_html=True)
-
-        if dias < 0:
-            dias_txt = f'<span style="color:#E84040;font-weight:700;">{abs(dias)}d atraso</span>'
-        elif dias <= ALERTA_DIAS:
-            dias_txt = f'<span style="color:#E8A020;font-weight:700;">{dias}d</span>'
-        else:
-            dias_txt = f'<span style="color:#52B788;">{dias}d</span>'
-        cols[5].markdown(f'<div style="padding-top:8px;">{dias_txt}</div>', unsafe_allow_html=True)
-        cols[6].markdown(f'<div style="padding-top:4px;">{_badge(dias)}</div>', unsafe_allow_html=True)
-
-        if cols[7].button("🗑", key=f"del_nf_{row_id}", help="Remover NF"):
+        cols[4].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{_venc_str(nf.get("Data_Emissao",""))}</div>', unsafe_allow_html=True)
+        cols[5].markdown(f'<div style="padding-top:4px;">{_badge(dias)}</div>', unsafe_allow_html=True)
+        if cols[6].button("🗑", key=f"del_nf_{row_id}"):
             if excluir_nf(row_id):
                 st.toast("NF removida.", icon="🗑")
                 st.rerun()
-
         st.markdown('<div class="nf-tbl-div"></div>', unsafe_allow_html=True)
 
     st.caption(f"Total: {len(lista)} NF(s) · Validade: {VALIDADE_DIAS} dias · Alerta: {ALERTA_DIAS} dias antes.")
@@ -204,18 +219,19 @@ def render_aba_nf_demo():
                 font-weight:700;color:#F0F4F8;line-height:1.1;">NF em Demonstração</div>
     <div style="font-size:12px;color:#6A7A8A;text-transform:uppercase;
                 letter-spacing:.07em;margin-top:4px;">
-      Controle de Notas Fiscais · Validade 60 dias · Alerta 10 dias antes</div>
+      Controle · Validade 60 dias · Alertas 15 e 10 dias antes · Notificação por e-mail</div>
   </div>
-</div>
-""", unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
-    lista = ler_nfs()   # ← Supabase, persiste sempre
-
+    lista = ler_nfs()
     _painel_alertas(lista)
     _kpis(lista)
-    st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">',
-                unsafe_allow_html=True)
+
+    # Botão de notificação por e-mail
+    if st.button("📧 Enviar Notificações por E-mail", key="btn_email_nf"):
+        _enviar_notificacoes(lista)
+
+    st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">', unsafe_allow_html=True)
     _formulario()
-    st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">',
-                unsafe_allow_html=True)
+    st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">', unsafe_allow_html=True)
     _tabela(lista)
