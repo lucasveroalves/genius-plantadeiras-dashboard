@@ -1,5 +1,5 @@
 """
-data/db.py — Genius Plantadeiras v14
+data/db.py — Genius Implementos Agrícolas v14
 Persistência completa via Supabase.
 Novidades v14:
   • genius_usuarios tem coluna abas_permitidas (JSON TEXT)
@@ -30,6 +30,24 @@ def _get_client():
 
 def _sb():
     return _get_client()
+
+def _exec_safe(operation, write: bool = False):
+    """
+    Executa uma operação Supabase (.execute()) com tratamento de erros de rede.
+    - write=True: mostra st.error() com mensagem amigável (ação do usuário)
+    - write=False: falha silenciosa (leitura automática)
+    Retorna o resultado ou None em caso de erro.
+    """
+    try:
+        return operation.execute()
+    except Exception as e:
+        err = str(e)
+        if write:
+            if "Errno -2" in err or "Name or service" in err or "network" in err.lower():
+                st.error("❌ Sem conexão com o banco de dados. Verifique a configuração do Supabase nos secrets do app.")
+            else:
+                st.error(f"❌ Erro ao salvar: {e}")
+        return None
 
 def _agora() -> str:
     return datetime.utcnow().isoformat()
@@ -108,15 +126,15 @@ def criar_usuario(login: str, nome: str, perfil: str, senha: str,
     sb = _sb()
     if not sb: return False
     try:
-        sb.table("genius_usuarios").insert({
+        res = _exec_safe(sb.table("genius_usuarios").insert({
             "login": login.strip().lower(), "nome": nome.strip(),
             "perfil": perfil, "senha_hash": _hash(senha),
             "is_admin": is_admin,
             "abas_permitidas": json.dumps(abas) if abas else None,
-        }).execute()
-        return True
+        }), write=True)
+        return res is not None
     except Exception as e:
-        st.error(f"Erro ao criar usuário: {e}"); return False
+        st.error(f"❌ Erro ao criar usuário: {e}"); return False
 
 def atualizar_usuario(login: str, dados: dict) -> bool:
     sb = _sb()
@@ -174,10 +192,10 @@ def adicionar_producao(reg: dict) -> bool:
     if not sb: return False
     try:
         payload = {k: str(v) if v is not None else "" for k, v in reg.items() if k in _COLS_PROD}
-        sb.table("genius_producao").insert(payload).execute()
-        return True
+        res = _exec_safe(sb.table("genius_producao").insert(payload), write=True)
+        return res is not None
     except Exception as e:
-        st.error(f"❌ Erro ao salvar produção: {e}"); return False
+        st.error(f"❌ Erro ao salvar: {e}"); return False
 
 def atualizar_producao_campo(row_id: int, campo: str, valor: str) -> bool:
     sb = _sb()
@@ -254,10 +272,10 @@ def adicionar_orcamento(reg: dict) -> bool:
             try: reg["Valor_Total"] = float(reg.get("Quantidade",0)) * float(reg.get("Valor_Unit",0))
             except Exception: reg["Valor_Total"] = 0.0
         payload = {k: str(v) if v is not None else "" for k, v in reg.items() if k in _COLS_ORC}
-        sb.table("genius_orcamentos").insert(payload).execute()
-        return True
+        res = _exec_safe(sb.table("genius_orcamentos").insert(payload), write=True)
+        return res is not None
     except Exception as e:
-        st.error(f"Erro ao salvar orçamento: {e}"); return False
+        st.error(f"❌ Erro ao salvar: {e}"); return False
 
 def atualizar_orcamento(row_id: int, dados: dict) -> bool:
     sb = _sb()
@@ -299,10 +317,10 @@ def adicionar_nf(reg: dict) -> bool:
     sb = _sb()
     if not sb: return False
     try:
-        sb.table("genius_nf_demo").insert({k: reg.get(k,"") for k in _COLS_NF}).execute()
-        return True
+        res = _exec_safe(sb.table("genius_nf_demo").insert({k: reg.get(k,"") for k in _COLS_NF}), write=True)
+        return res is not None
     except Exception as e:
-        st.error(f"Erro ao salvar NF: {e}"); return False
+        st.error(f"❌ Erro ao salvar: {e}"); return False
 
 def excluir_nf(row_id: int) -> bool:
     sb = _sb()
@@ -334,10 +352,10 @@ def adicionar_revenda_cadastro(reg: dict) -> bool:
     sb = _sb()
     if not sb: return False
     try:
-        sb.table("genius_revendas").insert({k: reg.get(k,"") for k in _COLS_REV}).execute()
-        return True
+        res = _exec_safe(sb.table("genius_revendas").insert({k: reg.get(k,"") for k in _COLS_REV}), write=True)
+        return res is not None
     except Exception as e:
-        st.error(f"Erro ao salvar revenda: {e}"); return False
+        st.error(f"❌ Erro ao salvar: {e}"); return False
 
 def excluir_revenda_cadastro(row_id: int) -> bool:
     sb = _sb()
@@ -468,7 +486,7 @@ def enviar_email_nf(para: str, assunto: str, corpo: str) -> bool:
       smtp_port    = 587
       smtp_user    = "seu@email.com"
       smtp_pass    = "app_password"
-      remetente    = "Genius Plantadeiras <seu@email.com>"
+      remetente    = "Genius Implementos Agrícolas <seu@email.com>"
     """
     try:
         import smtplib
@@ -480,7 +498,7 @@ def enviar_email_nf(para: str, assunto: str, corpo: str) -> bool:
         port = int(cfg.get("smtp_port", 587))
         user = cfg.get("smtp_user", "")
         pwd  = cfg.get("smtp_pass", "")
-        rem  = cfg.get("remetente", user)
+        rem  = cfg.get("remetente", user)  # Atualizar nos secrets: remetente = "Genius Implementos Agrícolas <seu@email.com>"
 
         if not user or not pwd:
             st.warning("⚠️ E-mail não configurado nos secrets.")

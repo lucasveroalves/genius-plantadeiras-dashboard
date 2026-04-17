@@ -1,5 +1,5 @@
 """
-components/forms.py — Genius Plantadeiras v14
+components/forms.py — Genius Implementos Agrícolas v14
 • Revenda: campo "Endereço" removido
 • Orçamentos: status editável após lançamento
 • Status "Declinado" mostra campo observação obrigatório
@@ -23,10 +23,10 @@ from data.db import (
 def render_formulario_negociacao():
     st.markdown("## ✏️ Lançar Orçamento de Máquina")
 
-    if "global_form_counter" not in st.session_state:
-        st.session_state.global_form_counter = 0
-    st.session_state.global_form_counter += 1
-    uid = st.session_state.global_form_counter
+    # Chave estável baseada em timestamp de submissão, não em contador crescente.
+    # O contador era incrementado em CADA render, mudando a key do form e
+    # destruindo o estado preenchido pelo usuário.
+    uid = "maq"
 
     with st.form(key=f"form_neg_{uid}", clear_on_submit=False):
         col1, col2 = st.columns(2)
@@ -36,7 +36,7 @@ def render_formulario_negociacao():
             representante  = st.text_input("Representante",         placeholder="Nome do vendedor",key=f"rep_{uid}")
         with col2:
             data_pedido    = st.date_input("Data do Pedido", value=date.today(), format="DD/MM/YYYY", key=f"dt_ped_{uid}")
-            valor          = st.number_input("Valor (R$)", min_value=0.0, step=1000.0, format="%.2f", key=f"val_{uid}")
+            valor_txt      = st.text_input("Valor (R$)", placeholder="Ex: 250.000,00", key=f"val_{uid}")
             status_inicial = st.selectbox("Status Inicial",
                 ["Em Negociação","Em Aberto","Crédito","Pronto para Faturar"], key=f"st_{uid}")
         st.markdown("---")
@@ -54,6 +54,9 @@ def render_formulario_negociacao():
                 st.toast("⚠️ 'Equipamento' é obrigatório.", icon="🚫")
             elif not cliente.strip():
                 st.toast("⚠️ 'Cliente' é obrigatório.", icon="🚫")
+            valor = _parse_brl(valor_txt)
+            if valor <= 0 and valor_txt.strip():
+                st.toast("⚠️ Valor inválido. Use o formato: 250.000,00", icon="🚫")
             elif valor <= 0:
                 st.toast("⚠️ Valor deve ser maior que zero.", icon="🚫")
             else:
@@ -87,6 +90,17 @@ def _brl(v):
     except Exception:
         return "R$ 0,00"
 
+def _parse_brl(s: str) -> float:
+    """Converte string BRL para float. Aceita: 250.000,00 | 250000.00 | 250000"""
+    try:
+        s = s.strip().replace("R$","").replace(" ","")
+        # Formato BR: ponto como milhar, vírgula como decimal
+        if "," in s:
+            s = s.replace(".","").replace(",",".")
+        return float(s)
+    except Exception:
+        return 0.0
+
 
 def render_formulario_orcamento_pecas():
     st.markdown("## 📝 Lançar Orçamento de Peças")
@@ -99,7 +113,7 @@ def render_formulario_orcamento_pecas():
             nr_orcamento = st.text_input("Número do Orçamento", placeholder="Ex: ORC-2025-001")
         with col2:
             cliente_rev = st.text_input("Cliente / Revenda", placeholder="Nome do cliente")
-            valor_orc   = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f")
+            valor_orc_txt = st.text_input("Valor (R$)", placeholder="Ex: 15.000,00")
         status_orc = st.selectbox("Status", ["Aguardando","Declinado","Fechado"])
 
         # Campo observação aparece quando status = Declinado
@@ -114,6 +128,9 @@ def render_formulario_orcamento_pecas():
                 st.toast("⚠️ Número do Orçamento é obrigatório.", icon="🚫")
             elif not cliente_rev.strip():
                 st.toast("⚠️ Cliente é obrigatório.", icon="🚫")
+            valor_orc = _parse_brl(valor_orc_txt)
+            if valor_orc <= 0 and valor_orc_txt.strip():
+                st.toast("⚠️ Valor inválido. Use o formato: 15.000,00", icon="🚫")
             elif valor_orc <= 0:
                 st.toast("⚠️ Valor deve ser maior que zero.", icon="🚫")
             elif status_orc == "Declinado" and not obs_orc.strip():

@@ -1,5 +1,5 @@
 """
-data/loader.py — Genius Plantadeiras v14 (corrigido)
+data/loader.py — Genius Implementos Agrícolas v14 (corrigido)
 Correções aplicadas:
   • [BUG#1] calcular_kpis_pecas: verificação de coluna corrigida (estava invertida)
   • [BUG#2] tz_localize(None) trocado por tz_convert(None) — evita exceção em dados tz-aware

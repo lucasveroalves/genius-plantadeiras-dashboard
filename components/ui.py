@@ -1,5 +1,5 @@
 """
-components/ui.py — Genius Plantadeiras v14
+components/ui.py — Genius Implementos Agrícolas v14
 • Logo Genius na sidebar (substitui logo Streamlit)
 • Auto-refresh a cada 30 segundos via streamlit-autorefresh
 • Sidebar sem upload de Máquinas
@@ -21,7 +21,7 @@ def render_header():
         st.markdown("""
 <div style='text-align:center;padding:1rem 0;'>
   <span style='font-size:2.4rem;font-weight:800;color:#E36C2C;
-    font-family:Barlow Condensed,sans-serif;'>🌾 Genius Plantadeiras</span><br>
+    font-family:Barlow Condensed,sans-serif;'>🌾 Genius Implementos Agrícolas</span><br>
   <span style='color:#6A7A8A;font-size:1rem;'>Performance Comercial e Gestão Integrada</span>
 </div>""", unsafe_allow_html=True)
 
@@ -46,7 +46,7 @@ def render_sidebar_uploads():
     else:
         st.sidebar.markdown(
             "<div style='text-align:center;padding:12px 0 6px;'>"
-            "<span style='font-size:1.2rem;font-weight:700;color:#E36C2C;'>🌾 Genius Plantadeiras</span>"
+            "<span style='font-size:1.2rem;font-weight:700;color:#E36C2C;'>🌾 Genius Implementos Agrícolas</span>"
             "</div>", unsafe_allow_html=True)
 
     st.sidebar.markdown("---")
@@ -68,13 +68,15 @@ def render_banner_mock_pecas():
 def render_auto_refresh():
     """
     Auto-refresh real a cada 30 s (atualiza dados do Supabase para todos os usuários).
+    Limpa apenas o cache de DADOS (@st.cache_data), preservando o cliente
+    Supabase (@st.cache_resource) para evitar reconexões desnecessárias.
     """
     try:
         from streamlit_autorefresh import st_autorefresh
         count = st_autorefresh(interval=30_000, key="autorefresh_global")
         if count and count > 0:
-            # Limpa cache do Supabase para forçar releitura
-            st.cache_resource.clear()
+            # Limpa apenas cache de dados, NÃO o resource cache (cliente Supabase)
+            st.cache_data.clear()
     except ImportError:
         if "last_refresh" not in st.session_state:
             st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
@@ -82,6 +84,6 @@ def render_auto_refresh():
         with col_btn:
             if st.button("🔄 Atualizar", key="btn_refresh_manual"):
                 st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
-                st.cache_resource.clear()
+                st.cache_data.clear()
                 st.rerun()
         st.caption(f"Atualizado: {st.session_state.last_refresh}")
