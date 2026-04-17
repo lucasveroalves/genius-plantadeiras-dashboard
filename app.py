@@ -37,7 +37,153 @@ df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
 render_header()
 render_auto_refresh()
 
-# ── 5. Define abas visíveis para este usuário ─────────────────
+
+# ══════════════════════════════════════════════════════════════
+# FUNÇÃO AUXILIAR: ABA PEÇAS (deve vir antes do MAPA)
+# ══════════════════════════════════════════════════════════════
+def _render_aba_pecas(df_pecas, is_mock_pecas):
+    perfil = st.session_state.get("perfil_atual", "comercial")
+
+    if is_mock_pecas:
+        render_banner_mock_pecas()
+        return
+
+    st.header("🔧 Análise de Peças")
+
+    # ── Filtro de Período ──────────────────────────────────────
+    col_f1, col_f2 = st.columns([4, 1])
+    with col_f1:
+        data_min = df_pecas["Data_Venda"].min().date() if not df_pecas.empty else date.today()
+        data_max = df_pecas["Data_Venda"].max().date() if not df_pecas.empty else date.today()
+        intervalo = st.date_input(
+            "Selecione o período",
+            value=(data_min, data_max),
+            min_value=data_min,
+            max_value=data_max,
+            format="DD/MM/YYYY",
+            key="peca_periodo"
+        )
+    with col_f2:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Aplicar", key="peca_btn_filtro"):
+            st.rerun()
+
+    # Aplica filtro
+    if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
+        d0, d1 = intervalo
+        dv = df_pecas["Data_Venda"]
+        # Remove timezone se houver
+        if hasattr(dv.dt, "tz") and dv.dt.tz is not None:
+            dv = dv.dt.tz_localize(None)
+        df_filtrado = df_pecas[(dv.dt.date >= d0) & (dv.dt.date <= d1)]
+    else:
+        df_filtrado = df_pecas
+
+    # ── Orçamentos de Peças (para KPI "Em Orçamento") ──────────
+    df_orc = ler_orcamentos()
+    pecas_em_orc = 0.0
+    if not df_orc.empty and "Status_Orc" in df_orc.columns:
+        mask = df_orc["Status_Orc"].isin(["Aguardando"])
+        pecas_em_orc = pd.to_numeric(df_orc.loc[mask, "Valor_Total"], errors="coerce").fillna(0).sum()
+
+    # ── KPIs ───────────────────────────────────────────────────
+    kpis = calcular_kpis_pecas(df_filtrado)
+
+    def _brl(v):
+        try:
+            v = float(v)
+            return f"R$ {int(v):,}".replace(",", ".") + f",{v:.2f}".split(".")[1]
+        except Exception:
+            return "R$ 0,00"
+
+    def _card(label, value):
+        st.markdown(
+            f'<div style="background:#1F2937;border:1px solid #2D3748;'
+            f'border-left:4px solid #E36C2C;border-radius:10px;'
+            f'padding:14px 16px 10px;min-height:80px;">'
+            f'<div style="font-size:11px;font-weight:700;color:#6A7A8A;'
+            f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">{label}</div>'
+            f'<div style="font-size:1.35rem;font-weight:700;color:#F0F4F8;'
+            f'word-break:break-word;">{value}</div></div>',
+            unsafe_allow_html=True
+        )
+
+    if perfil == "comercial":
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            _card("💰 Peças Faturadas", _brl(kpis["total_faturado"]))
+        with c2:
+            _card("📋 Em Orçamento", _brl(pecas_em_orc))
+        with c3:
+            _card("📦 Volume de Itens", f"{int(kpis['volume_itens']):,}".replace(",", "."))
+        with c4:
+            _card("🎟️ Ticket Médio", _brl(kpis["ticket_medio"]))
+        with c5:
+            _card("🏷️ SKUs Ativos", str(kpis["qtd_skus"]))
+        st.divider()
+    else:
+        # PCP vê apenas volume e SKUs
+        c1, c2 = st.columns(2)
+        with c1:
+            _card("📦 Volume de Itens", f"{int(kpis['volume_itens']):,}".replace(",", "."))
+        with c2:
+            _card("🏷️ SKUs Ativos", str(kpis["qtd_skus"]))
+        st.divider()
+
+    # ── Curva ABC ───────────────────────────────────────────────
+    from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
+
+    df_abc = calcular_curva_abc(df_filtrado, top_n=12)
+
+    if perfil == "comercial":
+        col_abc, col_rev = st.columns(2)
+        with col_abc:
+            st.subheader("📊 Curva ABC – Peças Mais Vendidas")
+            if not df_abc.empty:
+                st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
+            else:
+                st.info("Sem dados para Curva ABC.")
+        with col_rev:
+            st.subheader("🏆 Top 10 Revendas")
+            if not df_filtrado.empty:
+                st.plotly_chart(grafico_ranking_revendas_pecas(df_filtrado, top_n=10), use_container_width=True)
+            else:
+                st.info("Sem dados de revendas.")
+    else:
+        # PCP: apenas curva ABC + orçamentos abertos
+        st.subheader("📊 Curva ABC – Previsão de Estoque Mínimo de Peças")
+        if not df_abc.empty:
+            st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
+        else:
+            st.info("Sem dados para Curva ABC.")
+
+        if not df_orc.empty and "Status_Orc" in df_orc.columns:
+            st.divider()
+            st.subheader("📋 Orçamentos de Peças em Aberto")
+            df_orc_view = df_orc[df_orc["Status_Orc"] == "Aguardando"][
+                ["Nr_Pedido", "Data_Orcamento", "Cliente_Revenda", "Valor_Total", "Status_Orc"]
+            ]
+            st.dataframe(df_orc_view, use_container_width=True, height=300)
+
+    if perfil == "comercial":
+        st.divider()
+        st.subheader("📋 Detalhamento de Vendas (Peças)")
+        cols_fmt = {}
+        if "Valor_Unitario" in df_filtrado.columns:
+            cols_fmt["Valor_Unitario"] = "R$ {:,.2f}".format
+        if "Valor_Total" in df_filtrado.columns:
+            cols_fmt["Valor_Total"] = "R$ {:,.2f}".format
+        st.dataframe(
+            df_filtrado.style.format(cols_fmt) if cols_fmt else df_filtrado,
+            use_container_width=True,
+            height=400
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. Define abas visíveis para este usuário
+# ══════════════════════════════════════════════════════════════
 MAPA = {
     "📝 Orçamento de Peças":   lambda: render_formulario_orcamento_pecas(),
     "🏬 Revendas":             lambda: render_formulario_revendas(),
@@ -62,134 +208,3 @@ for tab, nome in zip(tabs, abas_visiveis):
             render_painel_admin()
         else:
             MAPA[nome]()
-
-
-# ══════════════════════════════════════════════════════════════
-# ABA PEÇAS — acesso para Comercial (completo) e PCP (Curva ABC)
-# ══════════════════════════════════════════════════════════════
-
-def _render_aba_pecas(df_pecas, is_mock_pecas):
-    perfil = st.session_state.get("perfil_atual","comercial")
-
-    if is_mock_pecas:
-        render_banner_mock_pecas()
-        return
-
-    st.header("🔧 Análise de Peças")
-
-    # ── Filtro de Período ──────────────────────────────────────
-    col_f1, col_f2 = st.columns([4,1])
-    with col_f1:
-        data_min = df_pecas["Data_Venda"].min().date() if not df_pecas.empty else date.today()
-        data_max = df_pecas["Data_Venda"].max().date() if not df_pecas.empty else date.today()
-        # Sem timezone nos limites do date_input
-        intervalo = st.date_input("Selecione o período", value=(data_min, data_max),
-                                   min_value=data_min, max_value=data_max,
-                                   format="DD/MM/YYYY", key="peca_periodo")
-    with col_f2:
-        st.write("")
-        st.write("")
-        if st.button("🔄 Aplicar", key="peca_btn_filtro"):
-            st.rerun()
-
-    # Aplica filtro
-    if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
-        d0, d1 = intervalo
-        dv = df_pecas["Data_Venda"]
-        # Remove timezone se houver
-        if hasattr(dv.dt, "tz") and dv.dt.tz is not None:
-            dv = dv.dt.tz_localize(None)
-        df_filtrado = df_pecas[(dv.dt.date >= d0) & (dv.dt.date <= d1)]
-    else:
-        df_filtrado = df_pecas
-
-    # ── Orçamentos de Peças (para KPI "Em Orçamento") ──────────
-    df_orc = ler_orcamentos()
-    pecas_em_orc = 0.0
-    if not df_orc.empty and "Status_Orc" in df_orc.columns:
-        mask = df_orc["Status_Orc"].isin(["Aguardando"])
-        pecas_em_orc = pd.to_numeric(df_orc.loc[mask,"Valor_Total"], errors="coerce").fillna(0).sum()
-
-    # ── KPIs (comercial vê tudo; PCP vê resumido) ──────────────
-    kpis = calcular_kpis_pecas(df_filtrado)
-
-    def _brl(v):
-        try:
-            v = float(v)
-            return f"R$ {int(v):,}".replace(",",".") + f",{v:.2f}".split(".")[1]
-        except Exception:
-            return "R$ 0,00"
-
-    def _card(label, value):
-        st.markdown(
-            f'<div style="background:#1F2937;border:1px solid #2D3748;'
-            f'border-left:4px solid #E36C2C;border-radius:10px;'
-            f'padding:14px 16px 10px;min-height:80px;">'
-            f'<div style="font-size:11px;font-weight:700;color:#6A7A8A;'
-            f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">{label}</div>'
-            f'<div style="font-size:1.35rem;font-weight:700;color:#F0F4F8;'
-            f'word-break:break-word;">{value}</div></div>',
-            unsafe_allow_html=True)
-
-    if perfil == "comercial":
-        c1,c2,c3,c4,c5 = st.columns(5)
-        with c1: _card("💰 Peças Faturadas",      _brl(kpis["total_faturado"]))
-        with c2: _card("📋 Em Orçamento",         _brl(pecas_em_orc))
-        with c3: _card("📦 Volume de Itens",      f"{int(kpis['volume_itens']):,}".replace(",","."))
-        with c4: _card("🎟️ Ticket Médio",         _brl(kpis["ticket_medio"]))
-        with c5: _card("🏷️ SKUs Ativos",          str(kpis["qtd_skus"]))
-        st.divider()
-    else:
-        # PCP vê apenas o status inicial e curva ABC
-        c1, c2 = st.columns(2)
-        with c1: _card("📦 Volume de Itens", f"{int(kpis['volume_itens']):,}".replace(",","."))
-        with c2: _card("🏷️ SKUs Ativos",    str(kpis["qtd_skus"]))
-        st.divider()
-
-    # ── Curva ABC (visível para todos) ─────────────────────────
-    from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
-
-    df_abc = calcular_curva_abc(df_filtrado, top_n=12)
-
-    if perfil == "comercial":
-        col_abc, col_rev = st.columns(2)
-        with col_abc:
-            st.subheader("📊 Curva ABC – Peças Mais Vendidas")
-            if not df_abc.empty:
-                st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
-            else:
-                st.info("Sem dados para Curva ABC.")
-        with col_rev:
-            st.subheader("🏆 Top 10 Revendas")
-            if not df_filtrado.empty:
-                st.plotly_chart(grafico_ranking_revendas_pecas(df_filtrado, top_n=10), use_container_width=True)
-            else:
-                st.info("Sem dados de revendas.")
-    else:
-        # PCP: curva ABC em largura total + status dos orçamentos
-        st.subheader("📊 Curva ABC – Previsão de Estoque Mínimo de Peças")
-        if not df_abc.empty:
-            st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
-        else:
-            st.info("Sem dados para Curva ABC.")
-
-        # Orçamentos em aberto para o PCP ter visão de demanda
-        if not df_orc.empty:
-            st.divider()
-            st.subheader("📋 Orçamentos de Peças em Aberto")
-            df_orc_view = df_orc[df_orc["Status_Orc"] == "Aguardando"][
-                ["Nr_Pedido","Data_Orcamento","Cliente_Revenda","Valor_Total","Status_Orc"]
-            ] if "Status_Orc" in df_orc.columns else df_orc
-            st.dataframe(df_orc_view, use_container_width=True, height=300)
-
-    if perfil == "comercial":
-        st.divider()
-        st.subheader("📋 Detalhamento de Vendas (Peças)")
-        cols_fmt = {}
-        if "Valor_Unitario" in df_filtrado.columns:
-            cols_fmt["Valor_Unitario"] = "R$ {:,.2f}".format
-        if "Valor_Total" in df_filtrado.columns:
-            cols_fmt["Valor_Total"]    = "R$ {:,.2f}".format
-        st.dataframe(
-            df_filtrado.style.format(cols_fmt) if cols_fmt else df_filtrado,
-            use_container_width=True, height=400)
