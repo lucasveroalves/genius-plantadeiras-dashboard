@@ -165,8 +165,9 @@ def ler_producao() -> pd.DataFrame:
             if c not in df.columns: df[c] = ""
         # mantém coluna id para deleção
         return df[["id"] + _COLS_PROD].reset_index(drop=True)
-    except Exception as e:
-        st.warning(f"⚠️ Produção indisponível: {e}"); return pd.DataFrame(columns=_COLS_PROD)
+    except Exception:
+        # Silencioso: leitura automática de dados de produção.
+        return pd.DataFrame(columns=_COLS_PROD)
 
 def adicionar_producao(reg: dict) -> bool:
     sb = _sb()
@@ -176,7 +177,7 @@ def adicionar_producao(reg: dict) -> bool:
         sb.table("genius_producao").insert(payload).execute()
         return True
     except Exception as e:
-        st.warning(f"⚠️ Erro ao salvar produção: {e}"); return False
+        st.error(f"❌ Erro ao salvar produção: {e}"); return False
 
 def atualizar_producao_campo(row_id: int, campo: str, valor: str) -> bool:
     sb = _sb()
@@ -240,8 +241,10 @@ def ler_orcamentos() -> pd.DataFrame:
         for c in _COLS_ORC:
             if c not in df.columns: df[c] = ""
         return df[["id"] + _COLS_ORC].reset_index(drop=True)
-    except Exception as e:
-        st.warning(f"⚠️ Orçamentos indisponíveis temporariamente."); return pd.DataFrame(columns=_COLS_ORC)
+    except Exception:
+        # Silencioso: leitura automática — não exibir banner para o usuário.
+        # O caller (aba Orçamentos) trata DataFrame vazio com st.info().
+        return pd.DataFrame(columns=_COLS_ORC)
 
 def adicionar_orcamento(reg: dict) -> bool:
     sb = _sb()
@@ -288,8 +291,9 @@ def ler_nfs() -> list[dict]:
     try:
         res = sb.table("genius_nf_demo").select("*").order("id").execute()
         return res.data or []
-    except Exception as e:
-        st.warning(f"⚠️ NFs indisponíveis temporariamente."); return []
+    except Exception:
+        # Silencioso: leitura automática de NFs.
+        return []
 
 def adicionar_nf(reg: dict) -> bool:
     sb = _sb()
@@ -322,8 +326,9 @@ def ler_revendas_cadastro() -> list[dict]:
     try:
         res = sb.table("genius_revendas").select("*").order("id").execute()
         return res.data or []
-    except Exception as e:
-        st.warning(f"⚠️ Revendas indisponíveis temporariamente."); return []
+    except Exception:
+        # Silencioso: leitura automática de revendas.
+        return []
 
 def adicionar_revenda_cadastro(reg: dict) -> bool:
     sb = _sb()
