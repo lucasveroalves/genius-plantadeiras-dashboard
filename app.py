@@ -1,5 +1,5 @@
 """
-app.py — Genius Plantadeiras v14
+app.py — Genius Implementos Agrícolas v14
 • Abas controladas por permissão (admin define por usuário)
 • Comercial → tudo; PCP → PCP + Curva ABC de Peças
 • KPIs de peças incluem orçamentos em aberto
@@ -11,19 +11,20 @@ import pandas as pd
 from datetime import date
 
 from auth import tela_login, painel_usuario, render_painel_admin, is_admin, abas_permitidas
-from data.loader import preparar_pecas, calcular_kpis_pecas, calcular_curva_abc
+from data.loader import preparar_pecas, calcular_kpis_pecas, calcular_curva_abc, calcular_curva_abc_por_codigo, calcular_top10_revendas
 from components.ui import render_header, render_sidebar_uploads, render_banner_mock_pecas, render_auto_refresh
 from components.estoque   import render_aba_estoque
 from components.producao  import render_aba_pcp
 from components.forms     import render_formulario_negociacao, render_formulario_orcamento_pecas, render_formulario_revendas
 from components.nf_demo   import render_aba_nf_demo
 from data.db              import ler_orcamentos
+from components.tab_leadtime import render_tab_leadtime
 
 # ── Importações de gráficos no topo (evita NameError dentro de funções) ───
 from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
 
 # ── Configuração ──────────────────────────────────────────────
-st.set_page_config(page_title="Genius Plantadeiras", layout="wide", page_icon="🌾")
+st.set_page_config(page_title="Genius Implementos Agrícolas", layout="wide", page_icon="🌾")
 
 # ── 1. Autenticação ───────────────────────────────────────────
 if not tela_login():
@@ -94,12 +95,12 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         pecas_em_orc = pd.to_numeric(df_orc.loc[mask, "Valor_Total"], errors="coerce").fillna(0).sum()
 
     # ── KPIs ───────────────────────────────────────────────────
-    kpis = calcular_kpis_pecas(df_filtrado)
+    kpis = calcular_kpis_pecas(df_filtrado, df_orc)
 
     def _brl(v):
+        """Formata valor no padrão BR: R$ 1.234.567,89"""
         try:
-            v = float(v)
-            return f"R$ {int(v):,}".replace(",", ".") + f",{v:.2f}".split(".")[1]
+            return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         except Exception:
             return "R$ 0,00"
 
@@ -138,7 +139,7 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         st.divider()
 
     # ── Curva ABC ──────────────────────────────────────────────
-    df_abc = calcular_curva_abc(df_filtrado, top_n=12)
+    df_abc = calcular_curva_abc_por_codigo(df_filtrado, top_n=20)
 
     if perfil == "comercial":
         col_abc, col_rev = st.columns(2)
@@ -150,8 +151,9 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
                 st.info("Sem dados para Curva ABC.")
         with col_rev:
             st.subheader("🏆 Top 10 Revendas")
-            if not df_filtrado.empty:
-                st.plotly_chart(grafico_ranking_revendas_pecas(df_filtrado, top_n=10), use_container_width=True)
+            df_top10 = calcular_top10_revendas(df_filtrado)
+            if not df_top10.empty:
+                st.plotly_chart(grafico_ranking_revendas_pecas(df_top10, top_n=10), use_container_width=True)
             else:
                 st.info("Sem dados de revendas.")
     else:
@@ -172,17 +174,20 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     if perfil == "comercial":
         st.divider()
-        st.subheader("📋 Detalhamento de Vendas (Peças)")
-        cols_fmt = {}
-        if "Valor_Unitario" in df_filtrado.columns:
-            cols_fmt["Valor_Unitario"] = "R$ {:,.2f}".format
-        if "Valor_Total" in df_filtrado.columns:
-            cols_fmt["Valor_Total"] = "R$ {:,.2f}".format
-        st.dataframe(
-            df_filtrado.style.format(cols_fmt) if cols_fmt else df_filtrado,
-            use_container_width=True,
-            height=400
-        )
+        _tab_detalhe, _tab_lead = st.tabs(["📋 Detalhamento de Vendas", "🕐 Lead Time"])
+        with _tab_detalhe:
+            cols_fmt = {}
+            if "Valor_Unitario" in df_filtrado.columns:
+                cols_fmt["Valor_Unitario"] = "R$ {:,.2f}".format
+            if "Valor_Total" in df_filtrado.columns:
+                cols_fmt["Valor_Total"] = "R$ {:,.2f}".format
+            st.dataframe(
+                df_filtrado.style.format(cols_fmt) if cols_fmt else df_filtrado,
+                use_container_width=True,
+                height=400
+            )
+        with _tab_lead:
+            render_tab_leadtime()
 
 
 # ══════════════════════════════════════════════════════════════

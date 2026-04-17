@@ -1,7 +1,7 @@
 """
 components/ui.py — Genius Implementos Agrícolas v14
 • Logo Genius na sidebar (substitui logo Streamlit)
-• Auto-refresh a cada 30 segundos via streamlit-autorefresh
+• Auto-refresh a cada 5 minutos via streamlit-autorefresh
 • Sidebar sem upload de Máquinas
 """
 
@@ -40,13 +40,21 @@ def render_sidebar_uploads():
   section[data-testid="stSidebar"] > div:first-child { padding-top: 0 !important; }
 </style>""", unsafe_allow_html=True)
 
+    # Logo na sidebar — tamanho reduzido para não duplicar com o cabeçalho principal
     logo = os.path.join(os.path.dirname(__file__), "..", "assets", "genius_logo.png")
     if os.path.exists(logo):
-        st.sidebar.image(logo, use_container_width=True)
+        # Centraliza e limita largura para não ocupar toda a sidebar
+        st.sidebar.markdown(
+            '<div style="display:flex;justify-content:center;padding:8px 0 4px;">',
+            unsafe_allow_html=True)
+        col_sb_l, col_sb_c, col_sb_r = st.sidebar.columns([1, 2, 1])
+        with col_sb_c:
+            st.image(logo, use_container_width=True)
+        st.sidebar.markdown('</div>', unsafe_allow_html=True)
     else:
         st.sidebar.markdown(
             "<div style='text-align:center;padding:12px 0 6px;'>"
-            "<span style='font-size:1.2rem;font-weight:700;color:#E36C2C;'>🌾 Genius Implementos Agrícolas</span>"
+            "<span style='font-size:1.1rem;font-weight:700;color:#E36C2C;'>🌾 Genius Implementos Agrícolas</span>"
             "</div>", unsafe_allow_html=True)
 
     st.sidebar.markdown("---")
@@ -73,7 +81,7 @@ def render_auto_refresh():
     """
     try:
         from streamlit_autorefresh import st_autorefresh
-        count = st_autorefresh(interval=30_000, key="autorefresh_global")
+        count = st_autorefresh(interval=300_000, key="autorefresh_global")  # 5 minutos
         if count and count > 0:
             # Limpa apenas cache de dados, NÃO o resource cache (cliente Supabase)
             st.cache_data.clear()

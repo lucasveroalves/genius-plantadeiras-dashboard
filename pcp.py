@@ -1,5 +1,5 @@
 """
-pcp.py — Genius Plantadeiras
+pcp.py — Genius Implementos Agrícolas
 Visão PCP (Planejamento e Controle da Produção)
 
 Acesso público — sem login necessário.
@@ -26,7 +26,7 @@ import streamlit as st
 
 # ── Configuração da página ────────────────────────────────────
 st.set_page_config(
-    page_title="PCP — Genius Plantadeiras",
+    page_title="PCP — Genius Implementos Agrícolas",
     page_icon="⚙️",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -260,7 +260,7 @@ def _render_header():
     </div>
     <div style="font-size:11px;color:#6A7A8A;text-transform:uppercase;
                 letter-spacing:.07em;margin-top:3px;">
-      Genius Plantadeiras &nbsp;·&nbsp; Planejamento e Controle da Produção
+      Genius Implementos Agrícolas &nbsp;·&nbsp; Planejamento e Controle da Produção
     </div>
   </div>
   <div style="margin-left:auto;background:rgba(74,122,191,.12);
@@ -564,7 +564,7 @@ from datetime import datetime
 st.markdown(
     f'<div style="text-align:center;color:#3A4858;font-size:12px;'
     f'padding:20px 0 8px;border-top:1px solid #2D3748;margin-top:32px;">'
-    f'Genius Plantadeiras — PCP · Atualizado em '
+    f'Genius Implementos Agrícolas — PCP · Atualizado em '
     f'{datetime.now().strftime("%d/%m/%Y às %H:%M:%S")}</div>',
     unsafe_allow_html=True,
 )

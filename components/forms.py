@@ -112,9 +112,13 @@ def render_formulario_orcamento_pecas():
             data_orc     = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
             nr_orcamento = st.text_input("Número do Orçamento", placeholder="Ex: ORC-2025-001")
         with col2:
-            cliente_rev = st.text_input("Cliente / Revenda", placeholder="Nome do cliente")
-            valor_orc_txt = st.text_input("Valor (R$)", placeholder="Ex: 15.000,00")
-        status_orc = st.selectbox("Status", ["Aguardando","Declinado","Fechado"])
+            cliente_rev   = st.text_input("Cliente / Revenda", placeholder="Nome do cliente")
+            valor_orc_txt = st.text_input("Valor Total (R$)", placeholder="Ex: 15.000,00")
+        col3, col4 = st.columns(2)
+        with col3:
+            qtd_itens = st.number_input("Volume de Itens (qtd peças)", min_value=0, step=1, value=0)
+        with col4:
+            status_orc = st.selectbox("Status", ["Aguardando","Declinado","Fechado"])
 
         # Campo observação aparece quando status = Declinado
         obs_orc = ""
@@ -141,7 +145,7 @@ def render_formulario_orcamento_pecas():
                     "Data_Orcamento":  data_orc.strftime("%d/%m/%Y"),
                     "Cliente_Revenda": cliente_rev.strip(),
                     "Descricao_Peca":  "",
-                    "Quantidade":      0,
+                    "Quantidade":      int(qtd_itens),
                     "Valor_Unit":      0.0,
                     "Valor_Total":     valor_orc,
                     "Status_Orc":      status_orc,
@@ -177,9 +181,9 @@ def render_formulario_orcamento_pecas():
     st.markdown("---")
 
     # Cabeçalho da tabela
-    cols_w = [0.8, 1.2, 1.8, 1.2, 1.5, 1.5, 0.5]
+    cols_w = [0.8, 1.1, 1.7, 0.9, 1.2, 1.4, 1.4, 0.5]
     hdr = st.columns(cols_w)
-    for c, lbl in zip(hdr, ["Nº Orc.","Data","Cliente","Valor","Status","Observação",""]):
+    for c, lbl in zip(hdr, ["Nº Orc.","Data","Cliente","Valor","Qtd","Status","Observação",""]):
         c.markdown(f'<div style="font-size:10px;font-weight:700;color:#3A4858;text-transform:uppercase;'
                    f'letter-spacing:.08em;padding-bottom:6px;border-bottom:1px solid #2D3748;">{lbl}</div>',
                    unsafe_allow_html=True)
@@ -192,11 +196,16 @@ def render_formulario_orcamento_pecas():
         cols[2].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{row.get("Cliente_Revenda","—")}</div>', unsafe_allow_html=True)
         cols[3].markdown(f'<div style="font-size:13px;color:#F0F4F8;font-weight:600;padding-top:8px;">{_brl(row.get("Valor_Total",0))}</div>', unsafe_allow_html=True)
 
+        _qtd_val = row.get("Quantidade", 0)
+        try: _qtd_val = int(float(_qtd_val))
+        except: _qtd_val = 0
+        cols[4].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{_qtd_val:,}</div>', unsafe_allow_html=True)
+
         # Status editável inline
         status_atual = str(row.get("Status_Orc","Aguardando"))
         opcoes = ["Aguardando","Declinado","Fechado"]
         idx_atual = opcoes.index(status_atual) if status_atual in opcoes else 0
-        novo_status = cols[4].selectbox("", opcoes, index=idx_atual,
+        novo_status = cols[5].selectbox("", opcoes, index=idx_atual,
                                          key=f"st_orc_{row_id}", label_visibility="collapsed")
         if novo_status != status_atual:
             if novo_status == "Declinado":
@@ -205,9 +214,9 @@ def render_formulario_orcamento_pecas():
                 atualizar_orcamento(row_id, {"Status_Orc": novo_status, "Observacoes": row.get("Observacoes","")})
                 st.rerun()
 
-        cols[5].markdown(f'<div style="font-size:11px;color:#A8B8CC;padding-top:8px;">{row.get("Observacoes","") or "—"}</div>', unsafe_allow_html=True)
+        cols[6].markdown(f'<div style="font-size:11px;color:#A8B8CC;padding-top:8px;">{row.get("Observacoes","") or "—"}</div>', unsafe_allow_html=True)
 
-        if cols[6].button("🗑", key=f"del_orc_{row_id}"):
+        if cols[7].button("🗑", key=f"del_orc_{row_id}"):
             excluir_orcamento(row_id)
             st.rerun()
 

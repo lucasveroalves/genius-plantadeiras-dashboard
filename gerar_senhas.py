@@ -17,7 +17,7 @@ USUARIOS = [
 ]
 
 print("=" * 60)
-print("  Genius Plantadeiras — Gerador de Senhas")
+print("  Genius Implementos Agrícolas — Gerador de Senhas")
 print("=" * 60)
 print("Digite a senha para cada usuário (min. 8 caracteres).")
 print("Os hashes serão exibidos para copiar no secrets.toml\n")
