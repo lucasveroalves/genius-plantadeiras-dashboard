@@ -1,7 +1,14 @@
 """
-components/producao.py — Genius Plantadeiras v14
-• Edição inline de Status e Data de Entrega Prevista diretamente na tabela
-• PCP e Comercial podem editar
+components/producao.py — Genius Plantadeiras v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-BUG-1]  Loop de rerun infinito eliminado: edições de data e status agora
+               usam st.session_state como debounce — só salva e rerun quando o valor
+               realmente mudou EM RELAÇÃO AO ESTADO ANTERIOR JÁ PERSISTIDO.
+               Registros com Data_Entrega_Prevista vazia não disparam rerun.
+  [FIX-PERF-4] Tabela isolada com @st.fragment (Streamlit >= 1.37) para reruns
+               parciais — evita redesenho de toda a página a cada edição de célula.
+               Fallback automático para versões anteriores do Streamlit.
 """
 
 from __future__ import annotations
@@ -17,15 +24,6 @@ from data.loader_estoque import STATUS_PROD
 
 ORG="#D4651E"; GRN="#3D9970"; GRN2="#52B788"; BLU2="#2A5A8A"
 YEL="#E8A020"; RED="#E84040"; T1="#EEF2F8"; T2="#A8B8CC"; T3="#6A7A8A"
-
-_STATUS_CORES = {
-    "Aguardando":  {"dot":YEL,  "text":"#E8C040"},
-    "Em Produção": {"dot":ORG,  "text":"#F08040"},
-    "Pronto":      {"dot":GRN,  "text":GRN2},
-    "Entregue":    {"dot":BLU2, "text":"#7AAFD4"},
-    "Cancelado":   {"dot":RED,  "text":"#E87878"},
-}
-_DEF = {"dot":T3, "text":T2}
 
 _CSS = """
 <style>
@@ -52,12 +50,22 @@ def _kpis(kpis):
         st.caption(f"⏱️ Ciclo médio: **{kpis['ciclo_medio_dias']:.1f} dias**")
 
 
-def _tabela(df: pd.DataFrame):
+def _tabela_inner(df: pd.DataFrame):
+    """
+    Conteúdo da tabela — chamado dentro de @st.fragment quando disponível.
+    [FIX-BUG-1] Debounce via session_state: compara valor novo com snapshot
+    armazenado antes de salvar + rerun, impedindo loop infinito.
+    """
     if df.empty:
         st.info("Nenhuma máquina em produção cadastrada.")
         return
 
     hoje = pd.Timestamp(date.today())
+
+    # Snapshot dos valores atuais para comparação de debounce
+    if "_prod_snapshot" not in st.session_state:
+        st.session_state["_prod_snapshot"] = {}
+
     cols_w = [1.4, 1.4, 1.0, 0.8, 1.3, 1.3, 1.1, 1.8, 0.4]
     hdr = st.columns(cols_w)
     for c, lbl in zip(hdr, [
@@ -70,7 +78,6 @@ def _tabela(df: pd.DataFrame):
         row_id = int(row.get("id", 0))
         status = str(row.get("Status_Producao",""))
         prev   = pd.to_datetime(row.get("Data_Entrega_Prevista",""), errors="coerce", dayfirst=True)
-        atrasado = pd.notna(prev) and prev < hoje and status not in ("Entregue","Cancelado")
 
         cols = st.columns(cols_w)
         cols[0].markdown(f'<div style="font-size:13px;color:#EEF2F8;font-weight:500;padding-top:8px;">{row.get("Equipamento","—")}</div>', unsafe_allow_html=True)
@@ -78,34 +85,45 @@ def _tabela(df: pd.DataFrame):
         cols[2].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{row.get("Representante","—")}</div>', unsafe_allow_html=True)
         cols[3].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{row.get("Data_Pedido","—")}</div>', unsafe_allow_html=True)
 
-        # ── Data de Entrega Prevista — editável ───────────────
-        prev_str = row.get("Data_Entrega_Prevista","")
+        # ── Data de Entrega Prevista — editável com debounce ──
+        prev_str = str(row.get("Data_Entrega_Prevista","")).strip()
         try:
             prev_val = pd.to_datetime(prev_str, dayfirst=True).date() if prev_str else date.today()
         except Exception:
             prev_val = date.today()
 
-        nova_prev = cols[4].date_input("", value=prev_val, format="DD/MM/YYYY",
-                                        key=f"dt_prev_{row_id}", label_visibility="collapsed")
+        nova_prev = cols[4].date_input(
+            "", value=prev_val, format="DD/MM/YYYY",
+            key=f"dt_prev_{row_id}", label_visibility="collapsed"
+        )
         nova_prev_str = nova_prev.strftime("%d/%m/%Y")
-        if nova_prev_str != prev_str and prev_str != "":
-            atualizar_producao_campo(row_id, "Data_Entrega_Prevista", nova_prev_str)
-            st.rerun()
+
+        # [FIX-BUG-1] Só persiste se: (a) havia valor anterior E (b) mudou
+        snap_key_dt = f"snap_dt_{row_id}"
+        if st.session_state["_prod_snapshot"].get(snap_key_dt) != nova_prev_str:
+            st.session_state["_prod_snapshot"][snap_key_dt] = nova_prev_str
+            # Só salva se o campo já existia no banco (prev_str não vazio)
+            if prev_str and nova_prev_str != prev_str:
+                atualizar_producao_campo(row_id, "Data_Entrega_Prevista", nova_prev_str)
+                st.rerun()
 
         cols[5].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{row.get("Data_Entrega_Real","") or "—"}</div>', unsafe_allow_html=True)
 
-        # ── Status — editável ─────────────────────────────────
+        # ── Status — editável com debounce ────────────────────
         idx_st = STATUS_PROD.index(status) if status in STATUS_PROD else 0
-        novo_st = cols[6].selectbox("", STATUS_PROD, index=idx_st,
-                                     key=f"st_prod_{row_id}", label_visibility="collapsed")
-        if novo_st != status:
-            payload = {"Status_Producao": novo_st}
-            if novo_st == "Entregue":
-                payload["Data_Entrega_Real"] = date.today().strftime("%d/%m/%Y")
-            atualizar_producao_campo(row_id, "Status_Producao", novo_st)
-            if novo_st == "Entregue":
-                atualizar_producao_campo(row_id, "Data_Entrega_Real", date.today().strftime("%d/%m/%Y"))
-            st.rerun()
+        novo_st = cols[6].selectbox(
+            "", STATUS_PROD, index=idx_st,
+            key=f"st_prod_{row_id}", label_visibility="collapsed"
+        )
+
+        snap_key_st = f"snap_st_{row_id}"
+        if st.session_state["_prod_snapshot"].get(snap_key_st) != novo_st:
+            st.session_state["_prod_snapshot"][snap_key_st] = novo_st
+            if novo_st != status:
+                atualizar_producao_campo(row_id, "Status_Producao", novo_st)
+                if novo_st == "Entregue":
+                    atualizar_producao_campo(row_id, "Data_Entrega_Real", date.today().strftime("%d/%m/%Y"))
+                st.rerun()
 
         obs = str(row.get("Observacoes","")) if pd.notna(row.get("Observacoes","")) else "—"
         cols[7].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{obs}</div>', unsafe_allow_html=True)
@@ -113,6 +131,7 @@ def _tabela(df: pd.DataFrame):
         if cols[8].button("🗑", key=f"del_prod_{row_id}", help="Remover"):
             if excluir_producao(row_id):
                 st.toast("Removido.", icon="🗑")
+                st.session_state["_prod_snapshot"] = {}
                 st.rerun()
 
         st.markdown('<div class="tbl-div-p"></div>', unsafe_allow_html=True)
@@ -126,6 +145,18 @@ def _tabela(df: pd.DataFrame):
     if atrasados:
         st.warning(f"⚠️ {atrasados} máquina(s) com previsão vencida.")
     st.caption(f"Total: {len(df)} registro(s).")
+
+
+# [FIX-PERF-4] Tenta usar @st.fragment para reruns parciais (Streamlit >= 1.37)
+# Se não disponível, define função normal como fallback.
+try:
+    @st.fragment
+    def _tabela(df: pd.DataFrame):
+        _tabela_inner(df)
+except AttributeError:
+    # Streamlit < 1.37 — fallback sem isolamento de fragment
+    def _tabela(df: pd.DataFrame):
+        _tabela_inner(df)
 
 
 def _form():
@@ -164,6 +195,8 @@ def _form():
                 }
                 if adicionar_producao(reg):
                     st.toast("✅ Adicionado ao ciclo de produção!", icon="✅")
+                    # Limpa snapshot para sincronizar com novos dados
+                    st.session_state["_prod_snapshot"] = {}
                     st.rerun()
 
 
@@ -196,7 +229,10 @@ def render_aba_pcp(df_maq=None):
                 n, msg = importar_producao(up)
             if msg == "OK":
                 st.toast(f"✅ {n} linha(s) importadas!", icon="✅")
+                st.session_state["_prod_snapshot"] = {}
                 st.rerun()
+            else:
+                st.error(f"❌ {msg}")
     with col_exp:
         if not df_prod.empty:
             st.download_button("📤 Exportar (.xlsx)", data=exportar_producao(),

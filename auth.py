@@ -1,10 +1,12 @@
 """
-auth.py — Genius Implementos Agrícolas v14
-• Login com logo Genius
-• Admin define quais abas cada usuário acessa
-• Comercial → acesso total
-• PCP → PCP + Curva ABC de Peças
-• Cada usuário redefine a própria senha; admin gerencia todos
+auth.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-SEC-1] Removido hardcode "lucas" como admin em todas as verificações
+  [FIX-SEC-6] Fallback seguro de abas_permitidas: lista vazia ao invés de TODAS_ABAS
+              quando session_state não tem o campo (evita exposição por sessão parcial)
+  [FIX-SEC-7] is_admin lido exclusivamente do banco via session_state,
+              sem comparação de string de login
 """
 
 from __future__ import annotations
@@ -22,14 +24,17 @@ TODAS_ABAS = [
     "📄 NF em Demonstração",
     "🔧 Peças",
 ]
-ABAS_COMERCIAL = TODAS_ABAS          # acesso total
-ABAS_PCP       = ["⚙️ PCP", "🔧 Peças"]   # PCP só vê PCP e Curva ABC
+ABAS_COMERCIAL = TODAS_ABAS
+ABAS_PCP       = ["⚙️ PCP", "🔧 Peças"]
 
 
 def _hash(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 def _verificar(digitada: str, salvo: str) -> bool:
+    # Bloco seguro: salvo vazio nunca autentica
+    if not salvo:
+        return False
     return hmac.compare_digest(_hash(digitada), salvo)
 
 
@@ -42,7 +47,6 @@ def tela_login() -> bool:
     with col_c:
         st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
 
-        # Logo — base64 embed para funcionar no Streamlit Cloud
         import os, base64 as _b64
         def _logo_b64(rel):
             for p in [
@@ -83,7 +87,7 @@ def tela_login() -> bool:
             entrar  = st.form_submit_button("Entrar", type="primary", use_container_width=True)
 
         if entrar:
-            usuarios  = ler_usuarios()
+            usuarios   = ler_usuarios()
             user_lower = usuario.strip().lower()
             if user_lower in usuarios:
                 d = usuarios[user_lower]
@@ -92,8 +96,10 @@ def tela_login() -> bool:
                     st.session_state.usuario_atual = user_lower
                     st.session_state.perfil_atual  = d.get("perfil", "comercial")
                     st.session_state.nome_usuario  = d.get("nome", usuario)
-                    st.session_state.is_admin      = bool(d.get("is_admin", False)) or user_lower == "lucas"
-                    # abas permitidas
+                    # [FIX-SEC-1] is_admin vem APENAS do banco, sem hardcode de login
+                    st.session_state.is_admin      = bool(d.get("is_admin", False))
+
+                    # Abas permitidas: custom > perfil > padrão seguro
                     abas_custom = d.get("abas_permitidas")
                     if abas_custom:
                         st.session_state.abas_permitidas = abas_custom
@@ -125,7 +131,6 @@ def painel_usuario():
     label = "Comercial" if perfil == "comercial" else "PCP"
     adm_badge = ' <span style="color:#E36C2C;font-size:10px;">★ Admin</span>' if admin else ""
 
-    # Logo na sidebar — base64 para Streamlit Cloud
     import os, base64 as _b64s
     def _sb_logo():
         for p in [
@@ -136,6 +141,7 @@ def painel_usuario():
                 with open(p, "rb") as _f:
                     return _b64s.b64encode(_f.read()).decode()
         return None
+
     _ldata = _sb_logo()
     if _ldata:
         st.sidebar.markdown(
@@ -262,7 +268,8 @@ def render_painel_admin():
     for login, d in usuarios.items():
         nome_u   = d.get("nome", login)
         perfil_u = d.get("perfil", "comercial")
-        admin_u  = d.get("is_admin", False) or login == "lucas"
+        # [FIX-SEC-1] admin_u vem apenas do banco
+        admin_u  = bool(d.get("is_admin", False))
         abas_u   = d.get("abas_permitidas", TODAS_ABAS if perfil_u == "comercial" else ABAS_PCP)
 
         with st.expander(f"{'★ ' if admin_u else ''}{nome_u}  —  @{login}  [{perfil_u}]"):
@@ -313,10 +320,15 @@ def render_painel_admin():
 
 
 def abas_permitidas() -> list[str]:
-    return st.session_state.get("abas_permitidas", TODAS_ABAS)
+    # [FIX-SEC-6] Fallback seguro: lista vazia se sessão parcial — app exibe aviso
+    abas = st.session_state.get("abas_permitidas")
+    if abas is None:
+        return []
+    return abas
 
 def perfil_atual() -> str:
     return st.session_state.get("perfil_atual", "comercial")
 
 def is_admin() -> bool:
-    return st.session_state.get("is_admin", False)
+    # [FIX-SEC-1] Apenas lê do session_state — sem hardcode de login
+    return bool(st.session_state.get("is_admin", False))

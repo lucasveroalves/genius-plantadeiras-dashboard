@@ -1,9 +1,14 @@
 """
-components/forms.py — Genius Implementos Agrícolas v14
-• Revenda: campo "Endereço" removido
-• Orçamentos: status editável após lançamento
-• Status "Declinado" mostra campo observação obrigatório
-• KPIs em tempo real (lidos do Supabase a cada render)
+components/forms.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-BUG-3]  Validação do formulário de orçamento de peças reestruturada:
+               bloco único com return antecipado — elimina toasts duplos/conflitantes
+               quando múltiplos campos estão inválidos simultaneamente.
+  [FIX-PERF-2] ler_orcamentos() com cache TTL=30s no db.py — forms.py não precisa
+               de mudança mas se beneficia automaticamente do cache.
+               Após mutações (adicionar/atualizar/excluir), cache é invalidado via
+               .clear() nas funções de db.py.
 """
 
 import streamlit as st
@@ -23,9 +28,6 @@ from data.db import (
 def render_formulario_negociacao():
     st.markdown("## ✏️ Lançar Orçamento de Máquina")
 
-    # Chave estável baseada em timestamp de submissão, não em contador crescente.
-    # O contador era incrementado em CADA render, mudando a key do form e
-    # destruindo o estado preenchido pelo usuário.
     uid = "maq"
 
     with st.form(key=f"form_neg_{uid}", clear_on_submit=False):
@@ -50,34 +52,39 @@ def render_formulario_negociacao():
         submitted   = st.form_submit_button("💾 Salvar Orçamento de Máquina", type="primary")
 
         if submitted:
+            # Validação centralizada com retorno antecipado
             if not equipamento.strip():
                 st.toast("⚠️ 'Equipamento' é obrigatório.", icon="🚫")
-            elif not cliente.strip():
+                st.stop()
+            if not cliente.strip():
                 st.toast("⚠️ 'Cliente' é obrigatório.", icon="🚫")
+                st.stop()
             valor = _parse_brl(valor_txt)
             if valor <= 0 and valor_txt.strip():
                 st.toast("⚠️ Valor inválido. Use o formato: 250.000,00", icon="🚫")
-            elif valor <= 0:
+                st.stop()
+            if valor <= 0:
                 st.toast("⚠️ Valor deve ser maior que zero.", icon="🚫")
+                st.stop()
+
+            reg = {
+                "Equipamento":           equipamento.strip(),
+                "Cliente":               cliente.strip(),
+                "Representante":         representante.strip(),
+                "Data_Pedido":           data_pedido.strftime("%d/%m/%Y"),
+                "Valor":                 valor,
+                "Status":                status_inicial,
+                "Status_Producao":       status_inicial,
+                "Data_Inicio_Producao":  data_inicio.strftime("%d/%m/%Y")  if data_inicio  else "",
+                "Data_Entrega_Prevista": data_entrega.strftime("%d/%m/%Y") if data_entrega else "",
+                "Data_Entrega_Real":     "",
+                "Observacoes":           observacoes.strip(),
+            }
+            if adicionar_producao(reg):
+                st.toast("✅ Orçamento de máquina salvo!", icon="✅")
+                st.rerun()
             else:
-                reg = {
-                    "Equipamento":           equipamento.strip(),
-                    "Cliente":               cliente.strip(),
-                    "Representante":         representante.strip(),
-                    "Data_Pedido":           data_pedido.strftime("%d/%m/%Y"),
-                    "Valor":                 valor,
-                    "Status":                status_inicial,
-                    "Status_Producao":       status_inicial,
-                    "Data_Inicio_Producao":  data_inicio.strftime("%d/%m/%Y")  if data_inicio  else "",
-                    "Data_Entrega_Prevista": data_entrega.strftime("%d/%m/%Y") if data_entrega else "",
-                    "Data_Entrega_Real":     "",
-                    "Observacoes":           observacoes.strip(),
-                }
-                if adicionar_producao(reg):
-                    st.toast("✅ Orçamento de máquina salvo!", icon="✅")
-                    st.rerun()
-                else:
-                    st.toast("❌ Erro ao salvar. Tente novamente.", icon="❌")
+                st.toast("❌ Erro ao salvar. Tente novamente.", icon="❌")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -94,7 +101,6 @@ def _parse_brl(s: str) -> float:
     """Converte string BRL para float. Aceita: 250.000,00 | 250000.00 | 250000"""
     try:
         s = s.strip().replace("R$","").replace(" ","")
-        # Formato BR: ponto como milhar, vírgula como decimal
         if "," in s:
             s = s.replace(".","").replace(",",".")
         return float(s)
@@ -105,7 +111,6 @@ def _parse_brl(s: str) -> float:
 def render_formulario_orcamento_pecas():
     st.markdown("## 📝 Lançar Orçamento de Peças")
 
-    # ── Formulário de novo orçamento ─────────────────────────
     with st.form(key="form_orc_pecas", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -120,42 +125,48 @@ def render_formulario_orcamento_pecas():
         with col4:
             status_orc = st.selectbox("Status", ["Aguardando","Declinado","Fechado"])
 
-        # Campo observação aparece quando status = Declinado
-        obs_orc = ""
-        if status_orc == "Declinado":
-            obs_orc = st.text_area("Motivo do Declínio *", placeholder="Descreva o motivo...", height=70)
+        obs_orc = st.text_area("Motivo do Declínio *" if status_orc == "Declinado" else "Observações",
+                               placeholder="Descreva o motivo..." if status_orc == "Declinado" else "",
+                               height=70)
 
         submitted = st.form_submit_button("💾 Salvar Orçamento de Peças", type="primary")
 
         if submitted:
+            # [FIX-BUG-3] Validação unificada com retorno antecipado — sem toasts duplos
+            erro = None
             if not nr_orcamento.strip():
-                st.toast("⚠️ Número do Orçamento é obrigatório.", icon="🚫")
+                erro = "⚠️ Número do Orçamento é obrigatório."
             elif not cliente_rev.strip():
-                st.toast("⚠️ Cliente é obrigatório.", icon="🚫")
-            valor_orc = _parse_brl(valor_orc_txt)
-            if valor_orc <= 0 and valor_orc_txt.strip():
-                st.toast("⚠️ Valor inválido. Use o formato: 15.000,00", icon="🚫")
-            elif valor_orc <= 0:
-                st.toast("⚠️ Valor deve ser maior que zero.", icon="🚫")
-            elif status_orc == "Declinado" and not obs_orc.strip():
-                st.toast("⚠️ Informe o motivo do declínio.", icon="🚫")
+                erro = "⚠️ Cliente é obrigatório."
             else:
-                reg = {
-                    "Nr_Pedido":       nr_orcamento.strip(),
-                    "Data_Orcamento":  data_orc.strftime("%d/%m/%Y"),
-                    "Cliente_Revenda": cliente_rev.strip(),
-                    "Descricao_Peca":  "",
-                    "Quantidade":      int(qtd_itens),
-                    "Valor_Unit":      0.0,
-                    "Valor_Total":     valor_orc,
-                    "Status_Orc":      status_orc,
-                    "Observacoes":     obs_orc.strip(),
-                }
-                if adicionar_orcamento(reg):
-                    st.toast("✅ Orçamento salvo!", icon="✅")
-                    st.rerun()
-                else:
-                    st.toast("❌ Erro ao salvar.", icon="❌")
+                valor_orc = _parse_brl(valor_orc_txt)
+                if valor_orc <= 0 and valor_orc_txt.strip():
+                    erro = "⚠️ Valor inválido. Use o formato: 15.000,00"
+                elif valor_orc <= 0:
+                    erro = "⚠️ Valor deve ser maior que zero."
+                elif status_orc == "Declinado" and not obs_orc.strip():
+                    erro = "⚠️ Informe o motivo do declínio."
+
+            if erro:
+                st.toast(erro, icon="🚫")
+                st.stop()
+
+            reg = {
+                "Nr_Pedido":       nr_orcamento.strip(),
+                "Data_Orcamento":  data_orc.strftime("%d/%m/%Y"),
+                "Cliente_Revenda": cliente_rev.strip(),
+                "Descricao_Peca":  "",
+                "Quantidade":      int(qtd_itens),
+                "Valor_Unit":      0.0,
+                "Valor_Total":     valor_orc,
+                "Status_Orc":      status_orc,
+                "Observacoes":     obs_orc.strip(),
+            }
+            if adicionar_orcamento(reg):
+                st.toast("✅ Orçamento salvo!", icon="✅")
+                st.rerun()
+            else:
+                st.toast("❌ Erro ao salvar.", icon="❌")
 
     # ── Tabela de orçamentos com edição de status ─────────────
     df_orc = ler_orcamentos()
@@ -167,7 +178,6 @@ def render_formulario_orcamento_pecas():
     st.divider()
     st.subheader("📋 Orçamentos Lançados")
 
-    # KPIs em tempo real
     kc1, kc2, kc3, kc4 = st.columns(4)
     total_val  = pd.to_numeric(df_orc["Valor_Total"], errors="coerce").fillna(0).sum()
     aguardando = int((df_orc["Status_Orc"] == "Aguardando").sum())
@@ -180,7 +190,6 @@ def render_formulario_orcamento_pecas():
 
     st.markdown("---")
 
-    # Cabeçalho da tabela
     cols_w = [0.8, 1.1, 1.7, 0.9, 1.2, 1.4, 1.4, 0.5]
     hdr = st.columns(cols_w)
     for c, lbl in zip(hdr, ["Nº Orc.","Data","Cliente","Valor","Qtd","Status","Observação",""]):
@@ -201,7 +210,6 @@ def render_formulario_orcamento_pecas():
         except: _qtd_val = 0
         cols[4].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{_qtd_val:,}</div>', unsafe_allow_html=True)
 
-        # Status editável inline
         status_atual = str(row.get("Status_Orc","Aguardando"))
         opcoes = ["Aguardando","Declinado","Fechado"]
         idx_atual = opcoes.index(status_atual) if status_atual in opcoes else 0
@@ -220,7 +228,6 @@ def render_formulario_orcamento_pecas():
             excluir_orcamento(row_id)
             st.rerun()
 
-        # Modal declínio inline
         if st.session_state.get(f"_declinar_{row_id}"):
             with st.container():
                 motivo = st.text_area(f"Motivo do declínio — {row.get('Nr_Pedido','')}",
@@ -242,7 +249,7 @@ def render_formulario_orcamento_pecas():
 
 
 # ══════════════════════════════════════════════════════════════
-# FORMULÁRIO 3 — CADASTRO DE REVENDAS (sem campo Endereço)
+# FORMULÁRIO 3 — CADASTRO DE REVENDAS
 # ══════════════════════════════════════════════════════════════
 
 def render_formulario_revendas():
@@ -264,20 +271,22 @@ def render_formulario_revendas():
         if submitted:
             if not nome_rev.strip():
                 st.toast("⚠️ Nome da Revenda é obrigatório.", icon="🚫")
-            elif not cidade.strip():
+                st.stop()
+            if not cidade.strip():
                 st.toast("⚠️ Cidade é obrigatória.", icon="🚫")
-            else:
-                reg = {
-                    "Nome_Revenda":    nome_rev.strip(),
-                    "CNPJ":            cnpj.strip(),
-                    "Cidade":          cidade.strip(),
-                    "Estado":          estado.strip().upper(),
-                    "Responsavel":     responsavel.strip(),
-                    "Regioes_Atuacao": regioes.strip(),
-                }
-                if adicionar_revenda_cadastro(reg):
-                    st.toast("✅ Revenda cadastrada!", icon="✅")
-                    st.rerun()
+                st.stop()
+
+            reg = {
+                "Nome_Revenda":    nome_rev.strip(),
+                "CNPJ":            cnpj.strip(),
+                "Cidade":          cidade.strip(),
+                "Estado":          estado.strip().upper(),
+                "Responsavel":     responsavel.strip(),
+                "Regioes_Atuacao": regioes.strip(),
+            }
+            if adicionar_revenda_cadastro(reg):
+                st.toast("✅ Revenda cadastrada!", icon="✅")
+                st.rerun()
 
     lista = ler_revendas_cadastro()
     if lista:

@@ -1,7 +1,10 @@
 """
-components/nf_demo.py — Genius Plantadeiras v14
-• Persistência via Supabase
-• Controle de NFs em demonstração com validade de 60 dias e alertas visuais.
+components/nf_demo.py — Genius Plantadeiras v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-PERF-7] _dias() e _venc_str() pré-calculados UMA VEZ antes de renderizar
+               a tabela, em vez de recalcular pd.to_datetime por célula.
+               Com 50 NFs: de 100 chamadas para 1 loop de pré-processamento.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import streamlit as st
 from data.db import ler_nfs, adicionar_nf, excluir_nf
 
 VALIDADE_DIAS = 60
-ALERTA_DIAS   = 15   # avisa com 15 e 10 dias
+ALERTA_DIAS   = 15
 
 _CSS = """
 <style>
@@ -28,14 +31,16 @@ _CSS = """
 """
 
 
-def _dias(data_str: str) -> int:
+def _calcular_dias(data_str: str) -> int:
+    """Calcula dias restantes até vencimento. Positivo = restante, negativo = vencida."""
     try:
         emissao = pd.to_datetime(data_str, dayfirst=True).date()
         return (emissao + timedelta(days=VALIDADE_DIAS) - date.today()).days
     except Exception:
         return 9999
 
-def _venc_str(data_str: str) -> str:
+def _calcular_venc_str(data_str: str) -> str:
+    """Retorna data de vencimento formatada DD/MM/YYYY."""
     try:
         return (pd.to_datetime(data_str, dayfirst=True).date() + timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y")
     except Exception:
@@ -59,13 +64,30 @@ def _badge(dias: int) -> str:
             f'✅ {dias}d</span>')
 
 
-def _painel_alertas(lista: list):
-    proximas = [nf for nf in lista if _dias(nf.get("Data_Emissao","")) <= ALERTA_DIAS]
+def _preencher_dados_nfs(lista: list) -> list[dict]:
+    """
+    [FIX-PERF-7] Pré-processa dias e vencimento de TODAS as NFs em um único loop,
+    evitando N chamadas redundantes a pd.to_datetime durante a renderização.
+    Retorna lista enriquecida com chaves: _dias, _venc_str.
+    """
+    resultado = []
+    for nf in lista:
+        data_str = nf.get("Data_Emissao", "")
+        resultado.append({
+            **nf,
+            "_dias":     _calcular_dias(data_str),
+            "_venc_str": _calcular_venc_str(data_str),
+        })
+    return resultado
+
+
+def _painel_alertas(lista_enriquecida: list):
+    proximas = [nf for nf in lista_enriquecida if nf["_dias"] <= ALERTA_DIAS]
     if not proximas:
         return
     st.markdown("### ⚠️ Alertas de Vencimento")
     for nf in proximas:
-        dias = _dias(nf.get("Data_Emissao",""))
+        dias = nf["_dias"]
         css  = "alerta-vencida" if dias < 0 else "alerta-vence"
         ico  = "🔴" if dias < 0 else ("🟠" if dias <= 10 else "🟡")
         msg  = f"{abs(dias)} dia(s) em atraso" if dias < 0 else f"{dias} dia(s) restante(s)"
@@ -75,17 +97,17 @@ def _painel_alertas(lista: list):
             f'<div style="font-weight:700;color:{cor};font-size:14px;">'
             f'NF {nf.get("Nr_NF","—")} — {nf.get("Cliente","—")} — {nf.get("Maquina","—")}</div>'
             f'<div style="color:#A8B8CC;font-size:12px;margin-top:3px;">'
-            f'Emitida {nf.get("Data_Emissao","—")} · Vence {_venc_str(nf.get("Data_Emissao",""))} '
+            f'Emitida {nf.get("Data_Emissao","—")} · Vence {nf["_venc_str"]} '
             f'<strong style="color:{cor};">({msg})</strong></div></div></div>',
             unsafe_allow_html=True)
     st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">', unsafe_allow_html=True)
 
 
-def _kpis(lista: list):
-    total   = len(lista)
-    ok      = sum(1 for nf in lista if _dias(nf.get("Data_Emissao","")) > ALERTA_DIAS)
-    aten    = sum(1 for nf in lista if 0 <= _dias(nf.get("Data_Emissao","")) <= ALERTA_DIAS)
-    venc    = sum(1 for nf in lista if _dias(nf.get("Data_Emissao","")) < 0)
+def _kpis(lista_enriquecida: list):
+    total = len(lista_enriquecida)
+    ok    = sum(1 for nf in lista_enriquecida if nf["_dias"] > ALERTA_DIAS)
+    aten  = sum(1 for nf in lista_enriquecida if 0 <= nf["_dias"] <= ALERTA_DIAS)
+    venc  = sum(1 for nf in lista_enriquecida if nf["_dias"] < 0)
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("📄 Total NFs",    total)
     c2.metric("✅ Em dia",        ok)
@@ -106,21 +128,26 @@ def _formulario():
         obs = st.text_area("Observações (opcional)", height=70)
         sub = st.form_submit_button("💾 Salvar NF em Demonstração", type="primary")
         if sub:
-            if not nr_nf.strip(): st.toast("⚠️ Número da NF obrigatório.", icon="🚫")
-            elif not cliente.strip(): st.toast("⚠️ Cliente obrigatório.", icon="🚫")
-            elif not maquina.strip(): st.toast("⚠️ Máquina obrigatória.", icon="🚫")
-            else:
-                reg = {"Data_Emissao": data_emissao.strftime("%d/%m/%Y"),
-                       "Nr_NF": nr_nf.strip(), "Cliente": cliente.strip(),
-                       "Maquina": maquina.strip(), "Observacoes": obs.strip()}
-                if adicionar_nf(reg):
-                    vence = (data_emissao + timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y")
-                    st.toast(f"✅ NF {nr_nf.strip()} salva! Vence {vence}.", icon="✅")
-                    st.rerun()
+            if not nr_nf.strip():
+                st.toast("⚠️ Número da NF obrigatório.", icon="🚫")
+                st.stop()
+            if not cliente.strip():
+                st.toast("⚠️ Cliente obrigatório.", icon="🚫")
+                st.stop()
+            if not maquina.strip():
+                st.toast("⚠️ Máquina obrigatória.", icon="🚫")
+                st.stop()
+            reg = {"Data_Emissao": data_emissao.strftime("%d/%m/%Y"),
+                   "Nr_NF": nr_nf.strip(), "Cliente": cliente.strip(),
+                   "Maquina": maquina.strip(), "Observacoes": obs.strip()}
+            if adicionar_nf(reg):
+                vence = (data_emissao + timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y")
+                st.toast(f"✅ NF {nr_nf.strip()} salva! Vence {vence}.", icon="✅")
+                st.rerun()
 
 
-def _tabela(lista: list):
-    if not lista:
+def _tabela(lista_enriquecida: list):
+    if not lista_enriquecida:
         st.info("Nenhuma NF cadastrada.")
         return
     st.markdown('<div class="nf-sec">📋 NFs em Demonstração</div>', unsafe_allow_html=True)
@@ -130,15 +157,17 @@ def _tabela(lista: list):
     for c, lbl in zip(hdr, ["Nº NF","Emissão","Cliente","Máquina","Vencimento","Status",""]):
         c.markdown(f'<div class="nf-tbl-hdr">{lbl}</div>', unsafe_allow_html=True)
 
-    for nf in lista:
-        dias   = _dias(nf.get("Data_Emissao",""))
+    for nf in lista_enriquecida:
+        # [FIX-PERF-7] Usa valores pré-calculados — sem nova chamada a pd.to_datetime
+        dias   = nf["_dias"]
+        venc   = nf["_venc_str"]
         row_id = nf.get("id")
         cols   = st.columns(cols_w)
         cols[0].markdown(f'<div style="font-size:13px;color:#EEF2F8;font-weight:600;padding-top:8px;">{nf.get("Nr_NF","—")}</div>', unsafe_allow_html=True)
         cols[1].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{nf.get("Data_Emissao","—")}</div>', unsafe_allow_html=True)
         cols[2].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{nf.get("Cliente","—")}</div>', unsafe_allow_html=True)
         cols[3].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{nf.get("Maquina","—")}</div>', unsafe_allow_html=True)
-        cols[4].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{_venc_str(nf.get("Data_Emissao",""))}</div>', unsafe_allow_html=True)
+        cols[4].markdown(f'<div style="font-size:12px;color:#6A7A8A;padding-top:8px;">{venc}</div>', unsafe_allow_html=True)
         cols[5].markdown(f'<div style="padding-top:4px;">{_badge(dias)}</div>', unsafe_allow_html=True)
         if cols[6].button("🗑", key=f"del_nf_{row_id}"):
             if excluir_nf(row_id):
@@ -146,7 +175,7 @@ def _tabela(lista: list):
                 st.rerun()
         st.markdown('<div class="nf-tbl-div"></div>', unsafe_allow_html=True)
 
-    st.caption(f"Total: {len(lista)} NF(s) · Validade: {VALIDADE_DIAS} dias · Alerta: {ALERTA_DIAS} dias antes.")
+    st.caption(f"Total: {len(lista_enriquecida)} NF(s) · Validade: {VALIDADE_DIAS} dias · Alerta: {ALERTA_DIAS} dias antes.")
 
 
 def render_aba_nf_demo():
@@ -165,7 +194,10 @@ def render_aba_nf_demo():
   </div>
 </div>""", unsafe_allow_html=True)
 
-    lista = ler_nfs()
+    lista_raw = ler_nfs()
+    # [FIX-PERF-7] Pré-processa todos os cálculos de data em um único loop
+    lista = _preencher_dados_nfs(lista_raw)
+
     _painel_alertas(lista)
     _kpis(lista)
 

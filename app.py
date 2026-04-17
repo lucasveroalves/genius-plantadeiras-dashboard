@@ -1,9 +1,15 @@
 """
-app.py — Genius Implementos Agrícolas v14
-• Abas controladas por permissão (admin define por usuário)
-• Comercial → tudo; PCP → PCP + Curva ABC de Peças
-• KPIs de peças incluem orçamentos em aberto
-• Auto-refresh 30 s propaga alterações para todos os usuários
+app.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-SEC-6]  Guarda de sessão expirada: se abas_permitidas estiver vazio
+               após login (sessão parcial), exibe aviso e força novo login.
+  [FIX-BUG-4]  KPIs de peças: passa data_inicio/data_fim para calcular_kpis_pecas()
+               garantindo que orçamentos sejam filtrados pelo mesmo período.
+  [FIX-PERF-2] render_auto_refresh usa ttl no cache em vez de clear() global —
+               alteração feita no ui.py; app.py permanece igual na chamada.
+  [FIX-RBAC]   Dados financeiros filtrados por perfil ANTES de calcular KPIs:
+               usuário PCP não recebe Valor_Total / Valor_Unitario.
 """
 
 import streamlit as st
@@ -20,7 +26,6 @@ from components.nf_demo   import render_aba_nf_demo
 from data.db              import ler_orcamentos
 from components.tab_leadtime import render_tab_leadtime
 
-# ── Importações de gráficos no topo (evita NameError dentro de funções) ───
 from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
 
 # ── Configuração ──────────────────────────────────────────────
@@ -43,11 +48,25 @@ render_auto_refresh()
 
 
 # ══════════════════════════════════════════════════════════════
-# FUNÇÃO AUXILIAR: ABA PEÇAS
-# Definida ANTES do dicionário MAPA para garantir resolução do nome.
-# Recebe df_pecas e is_mock_pecas como parâmetros explícitos para
-# evitar problemas de captura de variável em closures/lambdas.
+# HELPERS
 # ══════════════════════════════════════════════════════════════
+
+def _filtrar_pecas_por_perfil(df: pd.DataFrame, perfil: str) -> pd.DataFrame:
+    """
+    [FIX-RBAC] Remove colunas financeiras sensíveis para usuários PCP.
+    PCP só precisa de dados de volume/SKU para planejamento de estoque mínimo.
+    """
+    if perfil == "pcp":
+        cols_remover = [c for c in ["Valor_Unitario", "Valor_Total"] if c in df.columns]
+        if cols_remover:
+            return df.drop(columns=cols_remover)
+    return df
+
+
+# ══════════════════════════════════════════════════════════════
+# ABA PEÇAS
+# ══════════════════════════════════════════════════════════════
+
 def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     perfil = st.session_state.get("perfil_atual", "comercial")
 
@@ -76,29 +95,37 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         if st.button("🔄 Aplicar", key="peca_btn_filtro"):
             st.rerun()
 
-    # Aplica filtro
+    # Aplica filtro de período
+    d0, d1 = data_min, data_max
     if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
         d0, d1 = intervalo
         dv = df_pecas_arg["Data_Venda"]
-        # Remove timezone se houver
         if hasattr(dv.dt, "tz") and dv.dt.tz is not None:
             dv = dv.dt.tz_localize(None)
         df_filtrado = df_pecas_arg[(dv.dt.date >= d0) & (dv.dt.date <= d1)]
     else:
         df_filtrado = df_pecas_arg
 
-    # ── Orçamentos de Peças (para KPI "Em Orçamento") ──────────
+    # [FIX-RBAC] Filtra colunas financeiras para PCP antes de qualquer cálculo
+    df_para_calculos = _filtrar_pecas_por_perfil(df_filtrado, perfil)
+
+    # ── Orçamentos (sempre lidos frescos — cache TTL=30s no db.py) ──
     df_orc = ler_orcamentos()
     pecas_em_orc = 0.0
     if not df_orc.empty and "Status_Orc" in df_orc.columns:
         mask = df_orc["Status_Orc"].isin(["Aguardando"])
         pecas_em_orc = pd.to_numeric(df_orc.loc[mask, "Valor_Total"], errors="coerce").fillna(0).sum()
 
-    # ── KPIs ───────────────────────────────────────────────────
-    kpis = calcular_kpis_pecas(df_filtrado, df_orc)
+    # ── KPIs com período consistente ──────────────────────────
+    # [FIX-BUG-4] Passa d0/d1 para filtrar df_orc pelo mesmo período
+    if perfil == "comercial":
+        kpis = calcular_kpis_pecas(df_filtrado, df_orc,
+                                    data_inicio=d0, data_fim=d1)
+    else:
+        # PCP não recebe dados financeiros
+        kpis = calcular_kpis_pecas(df_para_calculos)
 
     def _brl(v):
-        """Formata valor no padrão BR: R$ 1.234.567,89"""
         try:
             return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         except Exception:
@@ -130,7 +157,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
             _card("🏷️ SKUs Ativos", str(kpis["qtd_skus"]))
         st.divider()
     else:
-        # PCP vê apenas volume e SKUs
         c1, c2 = st.columns(2)
         with c1:
             _card("📦 Volume de Itens", f"{int(kpis['volume_itens']):,}".replace(",", "."))
@@ -138,8 +164,8 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
             _card("🏷️ SKUs Ativos", str(kpis["qtd_skus"]))
         st.divider()
 
-    # ── Curva ABC ──────────────────────────────────────────────
-    df_abc = calcular_curva_abc_por_codigo(df_filtrado, top_n=20)
+    # ── Curva ABC — usa df_para_calculos (sem valores financeiros para PCP) ──
+    df_abc = calcular_curva_abc_por_codigo(df_para_calculos, top_n=20)
 
     if perfil == "comercial":
         col_abc, col_rev = st.columns(2)
@@ -157,7 +183,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
             else:
                 st.info("Sem dados de revendas.")
     else:
-        # PCP: apenas curva ABC + orçamentos abertos
         st.subheader("📊 Curva ABC – Previsão de Estoque Mínimo de Peças")
         if not df_abc.empty:
             st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
@@ -192,11 +217,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
 # ══════════════════════════════════════════════════════════════
 # 5. Define abas visíveis para este usuário
-#
-# CORREÇÃO CRÍTICA: as lambdas que capturam df_pecas e is_mock_pecas
-# usam parâmetros default (df=df_pecas, mock=is_mock_pecas) para
-# garantir captura por valor no momento da criação do dicionário,
-# não por referência no momento da chamada.
 # ══════════════════════════════════════════════════════════════
 MAPA = {
     "📝 Orçamento de Peças":   lambda: render_formulario_orcamento_pecas(),
@@ -209,6 +229,14 @@ MAPA = {
 }
 
 permitidas = abas_permitidas()
+
+# [FIX-SEC-6] Sessão parcial: se autenticado mas sem abas, força novo login
+if not permitidas and st.session_state.get("autenticado"):
+    st.warning("⚠️ Sessão expirada ou permissões não carregadas. Por favor, faça login novamente.")
+    for k in ["autenticado","usuario_atual","perfil_atual","nome_usuario","is_admin","abas_permitidas"]:
+        st.session_state.pop(k, None)
+    st.rerun()
+
 abas_visiveis = [a for a in MAPA if a in permitidas]
 
 if is_admin():

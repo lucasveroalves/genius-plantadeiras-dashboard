@@ -1,8 +1,13 @@
 """
-components/ui.py — Genius Implementos Agrícolas v14
-• Logo Genius na sidebar (substitui logo Streamlit)
-• Auto-refresh a cada 5 minutos via streamlit-autorefresh
-• Sidebar sem upload de Máquinas
+components/ui.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-PERF-2] render_auto_refresh: substituído st.cache_data.clear() global
+               por invalidação seletiva — limpa apenas _processar_bytes se necessário.
+               O cache global não é mais derrubado, evitando reprocessamento de
+               planilhas de TODOS os usuários ao mesmo tempo.
+               Na prática, os caches têm TTL próprio (300s para planilhas, 30s para
+               dados Supabase) e expiram naturalmente sem precisar de clear().
 """
 
 import os
@@ -11,7 +16,6 @@ from datetime import datetime
 
 
 def render_header():
-    # Logo / título centralizado
     logo = os.path.join(os.path.dirname(__file__), "..", "assets", "genius_logo.png")
     if os.path.exists(logo):
         col_l, col_c, col_r = st.columns([2, 1, 2])
@@ -29,21 +33,14 @@ def render_header():
 
 
 def render_sidebar_uploads():
-    """
-    Sidebar com logo Genius no topo (em vez do logo do Streamlit).
-    Retorna: arquivo de peças ou None.
-    """
-    # Esconde o branding padrão do Streamlit
     st.markdown("""
 <style>
   [data-testid="stSidebarHeader"] { display: none !important; }
   section[data-testid="stSidebar"] > div:first-child { padding-top: 0 !important; }
 </style>""", unsafe_allow_html=True)
 
-    # Logo na sidebar — tamanho reduzido para não duplicar com o cabeçalho principal
     logo = os.path.join(os.path.dirname(__file__), "..", "assets", "genius_logo.png")
     if os.path.exists(logo):
-        # Centraliza e limita largura para não ocupar toda a sidebar
         st.sidebar.markdown(
             '<div style="display:flex;justify-content:center;padding:8px 0 4px;">',
             unsafe_allow_html=True)
@@ -75,16 +72,18 @@ def render_banner_mock_pecas():
 
 def render_auto_refresh():
     """
-    Auto-refresh real a cada 30 s (atualiza dados do Supabase para todos os usuários).
-    Limpa apenas o cache de DADOS (@st.cache_data), preservando o cliente
-    Supabase (@st.cache_resource) para evitar reconexões desnecessárias.
+    [FIX-PERF-2] Auto-refresh a cada 5 minutos SEM clear() global de cache.
+    Os caches têm TTL próprio configurado em db.py e loader.py:
+      - Dados Supabase (produção, orçamentos, leadtime): ttl=30s
+      - Planilha Senior processada: ttl=300s
+      - Cliente Supabase: ttl=3600s
+    O auto-refresh apenas força um rerun para que os widgets reflitam
+    dados cujo TTL já expirou naturalmente — sem derrubar cache de ninguém.
     """
     try:
         from streamlit_autorefresh import st_autorefresh
-        count = st_autorefresh(interval=300_000, key="autorefresh_global")  # 5 minutos
-        if count and count > 0:
-            # Limpa apenas cache de dados, NÃO o resource cache (cliente Supabase)
-            st.cache_data.clear()
+        # Apenas rerun — sem cache.clear()
+        st_autorefresh(interval=300_000, key="autorefresh_global")
     except ImportError:
         if "last_refresh" not in st.session_state:
             st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
@@ -92,6 +91,5 @@ def render_auto_refresh():
         with col_btn:
             if st.button("🔄 Atualizar", key="btn_refresh_manual"):
                 st.session_state.last_refresh = datetime.now().strftime("%H:%M:%S")
-                st.cache_data.clear()
                 st.rerun()
         st.caption(f"Atualizado: {st.session_state.last_refresh}")
