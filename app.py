@@ -19,6 +19,9 @@ from components.forms     import render_formulario_negociacao, render_formulario
 from components.nf_demo   import render_aba_nf_demo
 from data.db              import ler_orcamentos
 
+# ── Importações de gráficos no topo (evita NameError dentro de funções) ───
+from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
+
 # ── Configuração ──────────────────────────────────────────────
 st.set_page_config(page_title="Genius Plantadeiras", layout="wide", page_icon="🌾")
 
@@ -39,12 +42,15 @@ render_auto_refresh()
 
 
 # ══════════════════════════════════════════════════════════════
-# FUNÇÃO AUXILIAR: ABA PEÇAS (deve vir antes do MAPA)
+# FUNÇÃO AUXILIAR: ABA PEÇAS
+# Definida ANTES do dicionário MAPA para garantir resolução do nome.
+# Recebe df_pecas e is_mock_pecas como parâmetros explícitos para
+# evitar problemas de captura de variável em closures/lambdas.
 # ══════════════════════════════════════════════════════════════
-def _render_aba_pecas(df_pecas, is_mock_pecas):
+def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     perfil = st.session_state.get("perfil_atual", "comercial")
 
-    if is_mock_pecas:
+    if is_mock_pecas_arg:
         render_banner_mock_pecas()
         return
 
@@ -53,8 +59,8 @@ def _render_aba_pecas(df_pecas, is_mock_pecas):
     # ── Filtro de Período ──────────────────────────────────────
     col_f1, col_f2 = st.columns([4, 1])
     with col_f1:
-        data_min = df_pecas["Data_Venda"].min().date() if not df_pecas.empty else date.today()
-        data_max = df_pecas["Data_Venda"].max().date() if not df_pecas.empty else date.today()
+        data_min = df_pecas_arg["Data_Venda"].min().date() if not df_pecas_arg.empty else date.today()
+        data_max = df_pecas_arg["Data_Venda"].max().date() if not df_pecas_arg.empty else date.today()
         intervalo = st.date_input(
             "Selecione o período",
             value=(data_min, data_max),
@@ -72,13 +78,13 @@ def _render_aba_pecas(df_pecas, is_mock_pecas):
     # Aplica filtro
     if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
         d0, d1 = intervalo
-        dv = df_pecas["Data_Venda"]
+        dv = df_pecas_arg["Data_Venda"]
         # Remove timezone se houver
         if hasattr(dv.dt, "tz") and dv.dt.tz is not None:
             dv = dv.dt.tz_localize(None)
-        df_filtrado = df_pecas[(dv.dt.date >= d0) & (dv.dt.date <= d1)]
+        df_filtrado = df_pecas_arg[(dv.dt.date >= d0) & (dv.dt.date <= d1)]
     else:
-        df_filtrado = df_pecas
+        df_filtrado = df_pecas_arg
 
     # ── Orçamentos de Peças (para KPI "Em Orçamento") ──────────
     df_orc = ler_orcamentos()
@@ -131,9 +137,7 @@ def _render_aba_pecas(df_pecas, is_mock_pecas):
             _card("🏷️ SKUs Ativos", str(kpis["qtd_skus"]))
         st.divider()
 
-    # ── Curva ABC ───────────────────────────────────────────────
-    from charts.plots import grafico_curva_abc, grafico_ranking_revendas_pecas
-
+    # ── Curva ABC ──────────────────────────────────────────────
     df_abc = calcular_curva_abc(df_filtrado, top_n=12)
 
     if perfil == "comercial":
@@ -183,6 +187,11 @@ def _render_aba_pecas(df_pecas, is_mock_pecas):
 
 # ══════════════════════════════════════════════════════════════
 # 5. Define abas visíveis para este usuário
+#
+# CORREÇÃO CRÍTICA: as lambdas que capturam df_pecas e is_mock_pecas
+# usam parâmetros default (df=df_pecas, mock=is_mock_pecas) para
+# garantir captura por valor no momento da criação do dicionário,
+# não por referência no momento da chamada.
 # ══════════════════════════════════════════════════════════════
 MAPA = {
     "📝 Orçamento de Peças":   lambda: render_formulario_orcamento_pecas(),
@@ -191,7 +200,7 @@ MAPA = {
     "⚙️ PCP":                  lambda: render_aba_pcp(),
     "📦 Estoque de Máquinas":  lambda: render_aba_estoque(),
     "📄 NF em Demonstração":   lambda: render_aba_nf_demo(),
-    "🔧 Peças":                lambda: _render_aba_pecas(df_pecas, is_mock_pecas),
+    "🔧 Peças":                lambda df=df_pecas, mock=is_mock_pecas: _render_aba_pecas(df, mock),
 }
 
 permitidas = abas_permitidas()
