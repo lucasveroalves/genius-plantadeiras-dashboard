@@ -1,15 +1,14 @@
 """
 components/nf_demo.py — Genius Plantadeiras v14
 • Persistência via Supabase
-• Botão "Enviar Notificações" envia e-mail para NFs que vencem em ≤15 dias
-  (usa SMTP configurado nos secrets)
+• Controle de NFs em demonstração com validade de 60 dias e alertas visuais.
 """
 
 from __future__ import annotations
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
-from data.db import ler_nfs, adicionar_nf, excluir_nf, enviar_email_nf
+from data.db import ler_nfs, adicionar_nf, excluir_nf
 
 VALIDADE_DIAS = 60
 ALERTA_DIAS   = 15   # avisa com 15 e 10 dias
@@ -94,63 +93,6 @@ def _kpis(lista: list):
     c4.metric("🔴 Vencidas",     venc)
 
 
-def _enviar_notificacoes(lista: list):
-    """Envia e-mail para NFs que vencem em ≤15 dias ou já vencidas."""
-    try:
-        email_destino = st.secrets.get("email",{}).get("notificacao_para","")
-    except Exception:
-        email_destino = ""
-
-    if not email_destino:
-        st.warning("Configure `email.notificacao_para` nos Secrets para receber notificações.")
-        return
-
-    proximas = [nf for nf in lista if _dias(nf.get("Data_Emissao","")) <= ALERTA_DIAS]
-    if not proximas:
-        st.info("Nenhuma NF com vencimento próximo — nada a notificar.")
-        return
-
-    linhas_html = ""
-    for nf in proximas:
-        dias = _dias(nf.get("Data_Emissao",""))
-        status = "VENCIDA" if dias < 0 else f"Vence em {dias} dia(s)"
-        cor    = "#E84040" if dias < 0 else ("#E8A020" if dias <= 10 else "#E8C040")
-        linhas_html += (
-            f'<tr><td style="padding:6px 10px;color:#EEF2F8;">{nf.get("Nr_NF","—")}</td>'
-            f'<td style="padding:6px 10px;color:#A8B8CC;">{nf.get("Cliente","—")}</td>'
-            f'<td style="padding:6px 10px;color:#A8B8CC;">{nf.get("Maquina","—")}</td>'
-            f'<td style="padding:6px 10px;">{_venc_str(nf.get("Data_Emissao",""))}</td>'
-            f'<td style="padding:6px 10px;font-weight:700;color:{cor};">{status}</td></tr>'
-        )
-
-    corpo = f"""
-<div style="font-family:sans-serif;background:#111827;padding:24px;border-radius:12px;">
-  <h2 style="color:#E36C2C;">🌾 Genius Plantadeiras — Alerta NF em Demonstração</h2>
-  <p style="color:#A8B8CC;">As seguintes NFs em demonstração estão próximas do vencimento ou já vencidas:</p>
-  <table style="width:100%;border-collapse:collapse;background:#1F2937;border-radius:8px;overflow:hidden;">
-    <thead>
-      <tr style="background:#2D3748;">
-        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Nº NF</th>
-        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Cliente</th>
-        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Máquina</th>
-        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Vencimento</th>
-        <th style="padding:8px 10px;color:#6A7A8A;text-align:left;">Status</th>
-      </tr>
-    </thead>
-    <tbody>{linhas_html}</tbody>
-  </table>
-  <p style="color:#6A7A8A;font-size:12px;margin-top:16px;">
-    Acesse o dashboard para mais detalhes.<br>
-    <em>Genius Plantadeiras — Sistema de Gestão v14</em>
-  </p>
-</div>"""
-
-    if enviar_email_nf(email_destino, "⚠️ Alerta — NFs em Demonstração próximas do vencimento", corpo):
-        st.success(f"✅ Notificação enviada para {email_destino} ({len(proximas)} NF(s)).")
-    else:
-        st.error("Falha ao enviar. Verifique as configurações de e-mail nos Secrets.")
-
-
 def _formulario():
     st.markdown('<div class="nf-sec">➕ Lançar Nova NF em Demonstração</div>', unsafe_allow_html=True)
     with st.form("form_nf_demo", clear_on_submit=True):
@@ -219,17 +161,13 @@ def render_aba_nf_demo():
                 font-weight:700;color:#F0F4F8;line-height:1.1;">NF em Demonstração</div>
     <div style="font-size:12px;color:#6A7A8A;text-transform:uppercase;
                 letter-spacing:.07em;margin-top:4px;">
-      Controle · Validade 60 dias · Alertas 15 e 10 dias antes · Notificação por e-mail</div>
+      Controle · Validade 60 dias · Alertas 15 e 10 dias antes</div>
   </div>
 </div>""", unsafe_allow_html=True)
 
     lista = ler_nfs()
     _painel_alertas(lista)
     _kpis(lista)
-
-    # Botão de notificação por e-mail
-    if st.button("📧 Enviar Notificações por E-mail", key="btn_email_nf"):
-        _enviar_notificacoes(lista)
 
     st.markdown('<hr style="border:none;border-top:1px solid #2D3748;margin:18px 0;">', unsafe_allow_html=True)
     _formulario()
