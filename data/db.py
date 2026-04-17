@@ -22,8 +22,10 @@ def _get_client():
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
         return create_client(url, key)
-    except Exception as e:
-        st.error(f"❌ Supabase não configurado: {e}")
+    except Exception:
+        # Silencioso: secrets ausentes ou Supabase indisponível.
+        # O erro não é exibido aqui pois esta função é chamada durante o
+        # carregamento do módulo (antes de set_page_config).
         return None
 
 def _sb():
@@ -138,7 +140,7 @@ def excluir_usuario(login: str) -> bool:
         sb.table("genius_usuarios").delete().eq("login", login).execute()
         return True
     except Exception as e:
-        st.error(f"Erro ao excluir: {e}"); return False
+        st.warning(f"⚠️ Erro ao excluir: {e}"); return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -164,7 +166,7 @@ def ler_producao() -> pd.DataFrame:
         # mantém coluna id para deleção
         return df[["id"] + _COLS_PROD].reset_index(drop=True)
     except Exception as e:
-        st.error(f"Erro ao ler produção: {e}"); return pd.DataFrame(columns=_COLS_PROD)
+        st.warning(f"⚠️ Produção indisponível: {e}"); return pd.DataFrame(columns=_COLS_PROD)
 
 def adicionar_producao(reg: dict) -> bool:
     sb = _sb()
@@ -174,7 +176,7 @@ def adicionar_producao(reg: dict) -> bool:
         sb.table("genius_producao").insert(payload).execute()
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar produção: {e}"); return False
+        st.warning(f"⚠️ Erro ao salvar produção: {e}"); return False
 
 def atualizar_producao_campo(row_id: int, campo: str, valor: str) -> bool:
     sb = _sb()
@@ -183,7 +185,7 @@ def atualizar_producao_campo(row_id: int, campo: str, valor: str) -> bool:
         sb.table("genius_producao").update({campo: str(valor)}).eq("id", row_id).execute()
         return True
     except Exception as e:
-        st.error(f"Erro ao atualizar: {e}"); return False
+        st.warning(f"⚠️ Erro ao atualizar: {e}"); return False
 
 def excluir_producao(row_id: int) -> bool:
     sb = _sb()
@@ -192,7 +194,7 @@ def excluir_producao(row_id: int) -> bool:
         sb.table("genius_producao").delete().eq("id", row_id).execute()
         return True
     except Exception as e:
-        st.error(f"Erro ao excluir: {e}"); return False
+        st.warning(f"⚠️ Erro ao excluir: {e}"); return False
 
 def importar_producao(uploaded) -> tuple[int, str]:
     try:
@@ -239,7 +241,7 @@ def ler_orcamentos() -> pd.DataFrame:
             if c not in df.columns: df[c] = ""
         return df[["id"] + _COLS_ORC].reset_index(drop=True)
     except Exception as e:
-        st.error(f"Erro ao ler orçamentos: {e}"); return pd.DataFrame(columns=_COLS_ORC)
+        st.warning(f"⚠️ Orçamentos indisponíveis temporariamente."); return pd.DataFrame(columns=_COLS_ORC)
 
 def adicionar_orcamento(reg: dict) -> bool:
     sb = _sb()
@@ -287,7 +289,7 @@ def ler_nfs() -> list[dict]:
         res = sb.table("genius_nf_demo").select("*").order("id").execute()
         return res.data or []
     except Exception as e:
-        st.error(f"Erro ao ler NFs: {e}"); return []
+        st.warning(f"⚠️ NFs indisponíveis temporariamente."); return []
 
 def adicionar_nf(reg: dict) -> bool:
     sb = _sb()
@@ -321,7 +323,7 @@ def ler_revendas_cadastro() -> list[dict]:
         res = sb.table("genius_revendas").select("*").order("id").execute()
         return res.data or []
     except Exception as e:
-        st.error(f"Erro ao ler revendas: {e}"); return []
+        st.warning(f"⚠️ Revendas indisponíveis temporariamente."); return []
 
 def adicionar_revenda_cadastro(reg: dict) -> bool:
     sb = _sb()
@@ -356,7 +358,7 @@ def ler_patio() -> pd.DataFrame:
         res = sb.table("genius_estoque_patio").select("*").order("id").execute()
         return _to_df(res.data or [], _COLS_PATIO)
     except Exception as e:
-        st.error(f"Erro pátio: {e}"); return pd.DataFrame(columns=_COLS_PATIO)
+        return pd.DataFrame(columns=_COLS_PATIO)
 
 def adicionar_patio(reg: dict) -> bool:
     sb = _sb()
@@ -365,7 +367,7 @@ def adicionar_patio(reg: dict) -> bool:
         sb.table("genius_estoque_patio").insert({k: str(reg.get(k,"")) for k in _COLS_PATIO}).execute()
         return True
     except Exception as e:
-        st.error(f"Erro: {e}"); return False
+        return False
 
 def excluir_patio(row_id: int) -> bool:
     sb = _sb()
@@ -374,7 +376,7 @@ def excluir_patio(row_id: int) -> bool:
         sb.table("genius_estoque_patio").delete().eq("id", row_id).execute()
         return True
     except Exception as e:
-        st.error(f"Erro: {e}"); return False
+        return False
 
 def exportar_patio() -> bytes:
     buf = io.BytesIO()
@@ -388,7 +390,7 @@ def ler_revendas_estoque() -> pd.DataFrame:
         res = sb.table("genius_estoque_revendas").select("*").order("id").execute()
         return _to_df(res.data or [], _COLS_EST_REV)
     except Exception as e:
-        st.error(f"Erro: {e}"); return pd.DataFrame(columns=_COLS_EST_REV)
+        return pd.DataFrame(columns=_COLS_EST_REV)
 
 def adicionar_revenda_estoque(reg: dict) -> bool:
     sb = _sb()
@@ -397,7 +399,7 @@ def adicionar_revenda_estoque(reg: dict) -> bool:
         sb.table("genius_estoque_revendas").insert({k: str(reg.get(k,"")) for k in _COLS_EST_REV}).execute()
         return True
     except Exception as e:
-        st.error(f"Erro: {e}"); return False
+        return False
 
 def excluir_revenda_estoque(row_id: int) -> bool:
     sb = _sb()
@@ -406,7 +408,7 @@ def excluir_revenda_estoque(row_id: int) -> bool:
         sb.table("genius_estoque_revendas").delete().eq("id", row_id).execute()
         return True
     except Exception as e:
-        st.error(f"Erro: {e}"); return False
+        return False
 
 def exportar_revendas_estoque() -> bytes:
     buf = io.BytesIO()
@@ -429,7 +431,8 @@ def salvar_cache_pecas(df: pd.DataFrame, nome: str) -> bool:
         }, on_conflict="chave").execute()
         return True
     except Exception as e:
-        st.error(f"Erro cache peças: {e}"); return False
+        # Falha silenciosa: cache é best-effort, não crítico
+        return False
 
 def ler_cache_pecas() -> tuple[pd.DataFrame | None, str]:
     sb = _sb()
@@ -443,7 +446,9 @@ def ler_cache_pecas() -> tuple[pd.DataFrame | None, str]:
             df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
         return df, row.get("nome_arquivo","planilha")
     except Exception as e:
-        st.error(f"Erro leitura cache: {e}"); return None, ""
+        # Silencioso: erro de rede/DNS na leitura do cache não deve
+        # exibir banner vermelho — o app simplesmente usará mock.
+        return None, ""
 
 
 # ══════════════════════════════════════════════════════════════
