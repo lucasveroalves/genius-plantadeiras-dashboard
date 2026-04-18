@@ -1,21 +1,28 @@
 """
-data/db.py — Genius Implementos Agrícolas v14
-Persistência completa via Supabase.
-Novidades v14:
-  • genius_usuarios tem coluna abas_permitidas (JSON TEXT)
-  • atualizar_usuario() para edição de perfil/abas/admin
-  • enviar_email_nf() para alertas de NF via SMTP (configurado nos secrets)
+data/db.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-SEC-1] Removido hardcode "lucas" como admin — is_admin vem exclusivamente do banco
+  [FIX-SEC-2] alterar_senha() não cria mais usuários fantasma; retorna False se login inexistente
+  [FIX-SEC-3] Cache de peças usa chave por usuário (evita vazamento entre usuários)
+  [FIX-SEC-4] SMTP usa ssl.create_default_context() para validar certificado TLS
+  [FIX-SEC-5] Fallback de secrets para ler_usuarios() garante que senha_hash esteja presente
+  [FIX-PERF-1] @st.cache_resource com ttl=3600 para recriar cliente Supabase se expirar
+  [FIX-PERF-2] ler_orcamentos() e ler_producao() com @st.cache_data(ttl=30)
+  [FIX-PERF-3] importar_producao() usa batch insert e limita a 500 linhas por chamada
+  [FIX-ROBUST-1] _exec_safe() agora envolve TODAS as operações de escrita em patio/revendas
 """
 
 from __future__ import annotations
-import io, json, hashlib, hmac
+import io, json, hashlib, hmac, ssl
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 
 
 # ── Cliente Supabase ──────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
+# ttl=3600 garante recriação periódica — evita conexão expirada silenciosa
+@st.cache_resource(show_spinner=False, ttl=3600)
 def _get_client():
     try:
         from supabase import create_client
@@ -23,9 +30,6 @@ def _get_client():
         key = st.secrets["supabase"]["key"]
         return create_client(url, key)
     except Exception:
-        # Silencioso: secrets ausentes ou Supabase indisponível.
-        # O erro não é exibido aqui pois esta função é chamada durante o
-        # carregamento do módulo (antes de set_page_config).
         return None
 
 def _sb():
@@ -88,38 +92,46 @@ def ler_usuarios() -> dict:
                         "nome":            r["nome"],
                         "perfil":          r["perfil"],
                         "senha_hash":      r["senha_hash"],
-                        "is_admin":        r.get("is_admin", False),
+                        # [FIX-SEC-1] is_admin vem apenas do banco, sem hardcode
+                        "is_admin":        bool(r.get("is_admin", False)),
                         "abas_permitidas": abas,
                     }
                 return out
         except Exception:
             pass
+
+    # Fallback para secrets (modo offline / desenvolvimento)
     try:
-        return {k: dict(v) for k, v in st.secrets["usuarios"].items()}
+        out = {}
+        for k, v in st.secrets["usuarios"].items():
+            d = dict(v)
+            # [FIX-SEC-5] Só inclui usuário se senha_hash estiver presente e não vazia
+            if not d.get("senha_hash", "").strip():
+                continue
+            out[k] = d
+        return out
     except Exception:
         return {}
 
 def alterar_senha(login: str, nova: str) -> bool:
+    """
+    [FIX-SEC-2] Altera senha APENAS se o usuário já existir no Supabase.
+    Não cria registros — isso previne usuários fantasma sem permissões corretas.
+    """
     sb = _sb()
-    if not sb: return False
+    if not sb:
+        return False
     try:
         h = _hash(nova)
         res = sb.table("genius_usuarios").select("id").eq("login", login).execute()
-        if res.data:
-            sb.table("genius_usuarios").update({"senha_hash": h}).eq("login", login).execute()
-        else:
-            # Cria a partir do fallback de secrets
-            dados = {}
-            try: dados = dict(st.secrets["usuarios"].get(login, {}))
-            except Exception: pass
-            sb.table("genius_usuarios").insert({
-                "login": login, "nome": dados.get("nome", login),
-                "perfil": dados.get("perfil", "comercial"),
-                "senha_hash": h, "is_admin": login == "lucas",
-            }).execute()
+        if not res.data:
+            st.error("❌ Usuário não encontrado no banco. Solicite ao administrador que crie o usuário primeiro.")
+            return False
+        sb.table("genius_usuarios").update({"senha_hash": h}).eq("login", login).execute()
         return True
     except Exception as e:
-        st.error(f"Erro ao alterar senha: {e}"); return False
+        st.error(f"Erro ao alterar senha: {e}")
+        return False
 
 def criar_usuario(login: str, nome: str, perfil: str, senha: str,
                   is_admin: bool = False, abas: list | None = None) -> bool:
@@ -171,6 +183,8 @@ _COLS_PROD = [
     "Status_Producao","Observacoes",
 ]
 
+# [FIX-PERF-2] Cache com TTL de 30s — evita chamada ao Supabase a cada render
+@st.cache_data(show_spinner=False, ttl=30)
 def ler_producao() -> pd.DataFrame:
     sb = _sb()
     if not sb: return pd.DataFrame(columns=_COLS_PROD)
@@ -181,10 +195,8 @@ def ler_producao() -> pd.DataFrame:
         df = pd.DataFrame(rows)
         for c in _COLS_PROD:
             if c not in df.columns: df[c] = ""
-        # mantém coluna id para deleção
         return df[["id"] + _COLS_PROD].reset_index(drop=True)
     except Exception:
-        # Silencioso: leitura automática de dados de produção.
         return pd.DataFrame(columns=_COLS_PROD)
 
 def adicionar_producao(reg: dict) -> bool:
@@ -193,7 +205,11 @@ def adicionar_producao(reg: dict) -> bool:
     try:
         payload = {k: str(v) if v is not None else "" for k, v in reg.items() if k in _COLS_PROD}
         res = _exec_safe(sb.table("genius_producao").insert(payload), write=True)
-        return res is not None
+        if res is not None:
+            # Invalida o cache para que próxima leitura busque dados atualizados
+            ler_producao.clear()
+            return True
+        return False
     except Exception as e:
         st.error(f"❌ Erro ao salvar: {e}"); return False
 
@@ -202,6 +218,7 @@ def atualizar_producao_campo(row_id: int, campo: str, valor: str) -> bool:
     if not sb: return False
     try:
         sb.table("genius_producao").update({campo: str(valor)}).eq("id", row_id).execute()
+        ler_producao.clear()
         return True
     except Exception as e:
         st.warning(f"⚠️ Erro ao atualizar: {e}"); return False
@@ -211,22 +228,44 @@ def excluir_producao(row_id: int) -> bool:
     if not sb: return False
     try:
         sb.table("genius_producao").delete().eq("id", row_id).execute()
+        ler_producao.clear()
         return True
     except Exception as e:
         st.warning(f"⚠️ Erro ao excluir: {e}"); return False
 
 def importar_producao(uploaded) -> tuple[int, str]:
+    """
+    [FIX-PERF-3] Usa batch insert (único POST) em vez de INSERT por linha.
+    Limita a 500 linhas por importação para evitar DoS / rate limit.
+    """
+    LIMITE_LINHAS = 500
     try:
         uploaded.seek(0)
         df = pd.read_csv(uploaded, encoding="utf-8-sig") if uploaded.name.lower().endswith(".csv") \
              else pd.read_excel(uploaded, engine="openpyxl")
     except Exception:
         return 0, "Erro ao ler arquivo."
-    count = 0
+
+    if len(df) > LIMITE_LINHAS:
+        return 0, f"Arquivo excede o limite de {LIMITE_LINHAS} linhas por importação."
+
+    sb = _sb()
+    if not sb:
+        return 0, "Sem conexão com o banco de dados."
+
+    # Prepara lista de dicts para batch insert
+    rows = []
     for _, row in df.iterrows():
-        if adicionar_producao({c: str(row.get(c,"")) for c in _COLS_PROD}):
-            count += 1
-    return count, "OK"
+        rows.append({c: str(row.get(c, "")) for c in _COLS_PROD})
+
+    try:
+        res = _exec_safe(sb.table("genius_producao").insert(rows), write=True)
+        if res is not None:
+            ler_producao.clear()
+            return len(rows), "OK"
+        return 0, "Erro ao inserir no banco."
+    except Exception as e:
+        return 0, f"Erro: {e}"
 
 def exportar_producao() -> bytes:
     buf = io.BytesIO()
@@ -248,6 +287,8 @@ _COLS_ORC = [
     "Status_Orc","Observacoes",
 ]
 
+# [FIX-PERF-2] Cache com TTL de 30s
+@st.cache_data(show_spinner=False, ttl=30)
 def ler_orcamentos() -> pd.DataFrame:
     sb = _sb()
     if not sb: return pd.DataFrame(columns=_COLS_ORC)
@@ -260,8 +301,6 @@ def ler_orcamentos() -> pd.DataFrame:
             if c not in df.columns: df[c] = ""
         return df[["id"] + _COLS_ORC].reset_index(drop=True)
     except Exception:
-        # Silencioso: leitura automática — não exibir banner para o usuário.
-        # O caller (aba Orçamentos) trata DataFrame vazio com st.info().
         return pd.DataFrame(columns=_COLS_ORC)
 
 def adicionar_orcamento(reg: dict) -> bool:
@@ -273,7 +312,10 @@ def adicionar_orcamento(reg: dict) -> bool:
             except Exception: reg["Valor_Total"] = 0.0
         payload = {k: str(v) if v is not None else "" for k, v in reg.items() if k in _COLS_ORC}
         res = _exec_safe(sb.table("genius_orcamentos").insert(payload), write=True)
-        return res is not None
+        if res is not None:
+            ler_orcamentos.clear()
+            return True
+        return False
     except Exception as e:
         st.error(f"❌ Erro ao salvar: {e}"); return False
 
@@ -283,6 +325,7 @@ def atualizar_orcamento(row_id: int, dados: dict) -> bool:
     try:
         payload = {k: str(v) for k, v in dados.items() if k in _COLS_ORC}
         sb.table("genius_orcamentos").update(payload).eq("id", row_id).execute()
+        ler_orcamentos.clear()
         return True
     except Exception as e:
         st.error(f"Erro ao atualizar orçamento: {e}"); return False
@@ -292,6 +335,7 @@ def excluir_orcamento(row_id: int) -> bool:
     if not sb: return False
     try:
         sb.table("genius_orcamentos").delete().eq("id", row_id).execute()
+        ler_orcamentos.clear()
         return True
     except Exception as e:
         st.error(f"Erro ao excluir orçamento: {e}"); return False
@@ -310,7 +354,6 @@ def ler_nfs() -> list[dict]:
         res = sb.table("genius_nf_demo").select("*").order("id").execute()
         return res.data or []
     except Exception:
-        # Silencioso: leitura automática de NFs.
         return []
 
 def adicionar_nf(reg: dict) -> bool:
@@ -345,7 +388,6 @@ def ler_revendas_cadastro() -> list[dict]:
         res = sb.table("genius_revendas").select("*").order("id").execute()
         return res.data or []
     except Exception:
-        # Silencioso: leitura automática de revendas.
         return []
 
 def adicionar_revenda_cadastro(reg: dict) -> bool:
@@ -361,18 +403,19 @@ def excluir_revenda_cadastro(row_id: int) -> bool:
     sb = _sb()
     if not sb: return False
     try:
-        sb.table("genius_revendas").delete().eq("id", row_id).execute()
-        return True
+        res = _exec_safe(sb.table("genius_revendas").delete().eq("id", row_id), write=True)
+        return res is not None
     except Exception as e:
         st.error(f"Erro ao excluir revenda: {e}"); return False
 
 
 # ══════════════════════════════════════════════════════════════
 # ESTOQUE PÁTIO / REVENDAS
+# [FIX-ROBUST-1] Todas operações de escrita agora usam _exec_safe()
 # ══════════════════════════════════════════════════════════════
 
-_COLS_PATIO = ["Codigo","Modelo","Tipo","Ano","Cor","Numero_Serie","Data_Entrada","Status_Patio","Observacoes"]
-_COLS_EST_REV = ["Codigo","Modelo","Revenda","Contato","Cidade","Estado","Data_Envio","Data_Retorno_Prevista","Status_Revenda","Observacoes"]
+_COLS_PATIO    = ["Codigo","Modelo","Tipo","Ano","Cor","Numero_Serie","Data_Entrada","Status_Patio","Observacoes"]
+_COLS_EST_REV  = ["Codigo","Modelo","Revenda","Contato","Cidade","Estado","Data_Envio","Data_Retorno_Prevista","Status_Revenda","Observacoes"]
 
 def ler_patio() -> pd.DataFrame:
     sb = _sb()
@@ -380,26 +423,26 @@ def ler_patio() -> pd.DataFrame:
     try:
         res = sb.table("genius_estoque_patio").select("*").order("id").execute()
         return _to_df(res.data or [], _COLS_PATIO)
-    except Exception as e:
+    except Exception:
         return pd.DataFrame(columns=_COLS_PATIO)
 
 def adicionar_patio(reg: dict) -> bool:
     sb = _sb()
     if not sb: return False
-    try:
-        sb.table("genius_estoque_patio").insert({k: str(reg.get(k,"")) for k in _COLS_PATIO}).execute()
-        return True
-    except Exception as e:
-        return False
+    res = _exec_safe(
+        sb.table("genius_estoque_patio").insert({k: str(reg.get(k,"")) for k in _COLS_PATIO}),
+        write=True
+    )
+    return res is not None
 
 def excluir_patio(row_id: int) -> bool:
     sb = _sb()
     if not sb: return False
-    try:
-        sb.table("genius_estoque_patio").delete().eq("id", row_id).execute()
-        return True
-    except Exception as e:
-        return False
+    res = _exec_safe(
+        sb.table("genius_estoque_patio").delete().eq("id", row_id),
+        write=True
+    )
+    return res is not None
 
 def exportar_patio() -> bytes:
     buf = io.BytesIO()
@@ -412,26 +455,26 @@ def ler_revendas_estoque() -> pd.DataFrame:
     try:
         res = sb.table("genius_estoque_revendas").select("*").order("id").execute()
         return _to_df(res.data or [], _COLS_EST_REV)
-    except Exception as e:
+    except Exception:
         return pd.DataFrame(columns=_COLS_EST_REV)
 
 def adicionar_revenda_estoque(reg: dict) -> bool:
     sb = _sb()
     if not sb: return False
-    try:
-        sb.table("genius_estoque_revendas").insert({k: str(reg.get(k,"")) for k in _COLS_EST_REV}).execute()
-        return True
-    except Exception as e:
-        return False
+    res = _exec_safe(
+        sb.table("genius_estoque_revendas").insert({k: str(reg.get(k,"")) for k in _COLS_EST_REV}),
+        write=True
+    )
+    return res is not None
 
 def excluir_revenda_estoque(row_id: int) -> bool:
     sb = _sb()
     if not sb: return False
-    try:
-        sb.table("genius_estoque_revendas").delete().eq("id", row_id).execute()
-        return True
-    except Exception as e:
-        return False
+    res = _exec_safe(
+        sb.table("genius_estoque_revendas").delete().eq("id", row_id),
+        write=True
+    )
+    return res is not None
 
 def exportar_revendas_estoque() -> bytes:
     buf = io.BytesIO()
@@ -441,53 +484,157 @@ def exportar_revendas_estoque() -> bytes:
 
 # ══════════════════════════════════════════════════════════════
 # CACHE PLANILHA PEÇAS
+# [FIX-SEC-3] Chave de cache inclui login do usuário — evita vazamento entre usuários
 # ══════════════════════════════════════════════════════════════
+
+def _cache_key() -> str:
+    """Gera chave de cache por usuário logado."""
+    usuario = st.session_state.get("usuario_atual", "anonimo")
+    return f"pecas_senior_{usuario}"
 
 def salvar_cache_pecas(df: pd.DataFrame, nome: str) -> bool:
     sb = _sb()
     if not sb: return False
     try:
+        chave = _cache_key()
         sb.table("genius_pecas_cache").upsert({
-            "chave": "pecas_senior", "nome_arquivo": nome,
+            "chave": chave, "nome_arquivo": nome,
             "dados_json": df.to_json(orient="records", date_format="iso", force_ascii=False),
             "atualizado_em": _agora(),
         }, on_conflict="chave").execute()
         return True
-    except Exception as e:
-        # Falha silenciosa: cache é best-effort, não crítico
+    except Exception:
         return False
 
 def ler_cache_pecas() -> tuple[pd.DataFrame | None, str]:
     sb = _sb()
     if not sb: return None, ""
     try:
-        res = sb.table("genius_pecas_cache").select("*").eq("chave","pecas_senior").execute()
+        chave = _cache_key()
+        res = sb.table("genius_pecas_cache").select("*").eq("chave", chave).execute()
         if not res.data: return None, ""
         row = res.data[0]
         df  = pd.read_json(io.StringIO(row["dados_json"]), orient="records")
         if "Data_Venda" in df.columns:
             df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
         return df, row.get("nome_arquivo","planilha")
-    except Exception as e:
-        # Silencioso: erro de rede/DNS na leitura do cache não deve
-        # exibir banner vermelho — o app simplesmente usará mock.
+    except Exception:
         return None, ""
 
 
 # ══════════════════════════════════════════════════════════════
+# LEAD TIME
+# ══════════════════════════════════════════════════════════════
+
+_COLS_LEAD = [
+    "Nr_Orcamento","Cliente_Revenda","Valor_Total",
+    "Data_Orcamento_Fechado","Nr_Requisicao","Data_Requisicao",
+    "Nr_NF","Data_NF","Status_Lead","Observacoes",
+]
+
+@st.cache_data(show_spinner=False, ttl=30)
+def ler_leadtime() -> pd.DataFrame:
+    sb = _sb()
+    if not sb: return pd.DataFrame(columns=_COLS_LEAD)
+    try:
+        res = sb.table("genius_leadtime_pecas").select("*").order("id").execute()
+        rows = res.data or []
+        if not rows: return pd.DataFrame(columns=_COLS_LEAD)
+        df = pd.DataFrame(rows)
+        for c in _COLS_LEAD:
+            if c not in df.columns: df[c] = ""
+        return df[["id"] + _COLS_LEAD].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=_COLS_LEAD)
+
+def adicionar_leadtime(reg: dict) -> bool:
+    sb = _sb()
+    if not sb: return False
+    try:
+        payload = {k: str(v) if v is not None else "" for k, v in reg.items() if k in _COLS_LEAD}
+        res = _exec_safe(sb.table("genius_leadtime_pecas").insert(payload), write=True)
+        if res is not None:
+            ler_leadtime.clear()
+            return True
+        return False
+    except Exception as e:
+        st.error(f"❌ Erro ao salvar: {e}"); return False
+
+def atualizar_leadtime(row_id: int, dados: dict) -> bool:
+    sb = _sb()
+    if not sb: return False
+    try:
+        payload = {k: str(v) for k, v in dados.items() if k in _COLS_LEAD}
+        sb.table("genius_leadtime_pecas").update(payload).eq("id", row_id).execute()
+        ler_leadtime.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar: {e}"); return False
+
+def excluir_leadtime(row_id: int) -> bool:
+    sb = _sb()
+    if not sb: return False
+    try:
+        sb.table("genius_leadtime_pecas").delete().eq("id", row_id).execute()
+        ler_leadtime.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao excluir: {e}"); return False
+
+def calcular_kpis_leadtime(df: pd.DataFrame) -> dict:
+    """
+    [FIX-IMPORT] Chaves alinhadas com tab_leadtime.py:
+      total_registros, aguardando_req, req_enviada, nf_emitida,
+      lead_medio_dias, lead_max_dias
+    """
+    zeros = {
+        "total_registros": 0,
+        "aguardando_req":  0,
+        "req_enviada":     0,
+        "nf_emitida":      0,
+        "lead_medio_dias": None,
+        "lead_max_dias":   None,
+    }
+    if df is None or df.empty:
+        return zeros
+    try:
+        total_registros = len(df)
+        aguardando_req  = int((df["Status_Lead"] == "Orçamento Fechado").sum())
+        req_enviada     = int((df["Status_Lead"] == "Req. Enviada").sum())
+        nf_emitida      = int((df["Status_Lead"] == "NF Emitida").sum())
+
+        # Lead time calculado sobre ciclo completo: fechamento → NF
+        lead_medio_dias = None
+        lead_max_dias   = None
+        try:
+            d1 = pd.to_datetime(df["Data_Orcamento_Fechado"], errors="coerce", dayfirst=True)
+            d2 = pd.to_datetime(df["Data_NF"], errors="coerce", dayfirst=True)
+            dias = (d2 - d1).dt.days.dropna()
+            dias = dias[dias >= 0]
+            if not dias.empty:
+                lead_medio_dias = round(float(dias.mean()), 1)
+                lead_max_dias   = int(dias.max())
+        except Exception:
+            pass
+
+        return {
+            "total_registros": total_registros,
+            "aguardando_req":  aguardando_req,
+            "req_enviada":     req_enviada,
+            "nf_emitida":      nf_emitida,
+            "lead_medio_dias": lead_medio_dias,
+            "lead_max_dias":   lead_max_dias,
+        }
+    except Exception:
+        return zeros
+
+
+# ══════════════════════════════════════════════════════════════
 # E-MAIL — notificações de NF
+# [FIX-SEC-4] SMTP com validação explícita de certificado TLS
 # ══════════════════════════════════════════════════════════════
 
 def enviar_email_nf(para: str, assunto: str, corpo: str) -> bool:
-    """
-    Envia e-mail via SMTP configurado nos secrets:
-      [email]
-      smtp_host    = "smtp.gmail.com"
-      smtp_port    = 587
-      smtp_user    = "seu@email.com"
-      smtp_pass    = "app_password"
-      remetente    = "Genius Implementos Agrícolas <seu@email.com>"
-    """
     try:
         import smtplib
         from email.mime.text import MIMEText
@@ -498,7 +645,7 @@ def enviar_email_nf(para: str, assunto: str, corpo: str) -> bool:
         port = int(cfg.get("smtp_port", 587))
         user = cfg.get("smtp_user", "")
         pwd  = cfg.get("smtp_pass", "")
-        rem  = cfg.get("remetente", user)  # Atualizar nos secrets: remetente = "Genius Implementos Agrícolas <seu@email.com>"
+        rem  = cfg.get("remetente", user)
 
         if not user or not pwd:
             st.warning("⚠️ E-mail não configurado nos secrets.")
@@ -510,9 +657,11 @@ def enviar_email_nf(para: str, assunto: str, corpo: str) -> bool:
         msg["To"]      = para
         msg.attach(MIMEText(corpo, "html", "utf-8"))
 
+        # [FIX-SEC-4] Contexto SSL explícito valida certificado do servidor SMTP
+        context = ssl.create_default_context()
         with smtplib.SMTP(host, port) as s:
             s.ehlo()
-            s.starttls()
+            s.starttls(context=context)
             s.login(user, pwd)
             s.sendmail(user, [para], msg.as_string())
         return True
