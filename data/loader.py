@@ -209,22 +209,26 @@ def _ler_excel_robusto(file_bytes: bytes, file_name: str) -> pd.DataFrame:
                 except Exception as e:
                     last_err = e
 
-    # ── Camada 2: xls / xlrd ─────────────────────────────────
-    for header in [4, 0]:
-        try:
-            df = pd.read_excel(
-                io.BytesIO(file_bytes), header=header, engine="xlrd",
-            )
-            cols_norm = {_norm_col(str(c)) for c in df.columns}
-            if cols_norm & _SENIOR_HEADER_MIN or header == 0:
-                return df
-        except Exception as e:
-            last_err = e
+    # ── Camada 2: xls / xlrd — APENAS para .xls real ─────────
+    # xlrd >= 2.0 recusa .xlsx; só tenta se a extensão for .xls
+    # OU se o arquivo não passou na validação de ZIP (falso-xlsx)
+    _is_xls_ext = fname_lower.endswith(".xls") and not fname_lower.endswith(".xlsx")
+    if _is_xls_ext or not xlsx_valido:
+        for header in [4, 0]:
+            try:
+                df = pd.read_excel(
+                    io.BytesIO(file_bytes), header=header, engine="xlrd",
+                )
+                cols_norm = {_norm_col(str(c)) for c in df.columns}
+                if cols_norm & _SENIOR_HEADER_MIN or header == 0:
+                    return df
+            except Exception as e:
+                last_err = e
 
     # ── Camada 3: varredura linha-a-linha ─────────────────────
-    # Tenta openpyxl primeiro; se o zip for inválido, cai direto no xlrd
-    engines_varredura = (["openpyxl", "xlrd"] if not xlsx_valido
-                         else ["openpyxl", "calamine", "xlrd"])
+    engines_varredura = ["openpyxl", "calamine"]
+    if _is_xls_ext or not xlsx_valido:
+        engines_varredura.append("xlrd")
     for engine in engines_varredura:
         df = _varrer_linhas_para_cabecalho(file_bytes, engine)
         if df is not None:
