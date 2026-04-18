@@ -58,7 +58,7 @@ def render_sidebar_uploads():
     st.sidebar.title("📁 Importar Planilha")
 
     with st.sidebar.expander("Upload de Arquivos", expanded=True):
-        pec = st.file_uploader("Peças (Senior ERP)", type=["xlsx"], key="up_pecas")
+        pec = st.file_uploader("Peças (Senior ERP)", type=["xlsx", "xls", "csv"], key="up_pecas")
 
     return pec
 

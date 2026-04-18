@@ -1,5 +1,5 @@
 """
-data/loader.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+data/loader.py — Genius Implementos Agrícolas v15
 
 Correções aplicadas:
   [FIX-BUG-4]  calcular_kpis_pecas: df_orc agora filtrado pelo mesmo período
@@ -10,10 +10,18 @@ Correções aplicadas:
                — expira por entrada, não derruba cache de todos os usuários
   [FIX-BUG-2]  tz_convert(None) mantido corretamente para dados tz-aware
   [FIX-BUG-3]  dropna() antes de comparação de datas mantido
+  [FIX-SENIOR] _ler_excel_robusto: adicionados fallbacks para arquivos corrompidos /
+               falso-xlsx exportados pelo Senior ERP (HTML, CSV, SYLK renomeados
+               para .xlsx). Estratégias em ordem:
+               1. openpyxl / calamine (xlsx válido)
+               2. xlrd (xls legado mesmo com extensão .xlsx)
+               3. Detecção de HTML disfarçado de xlsx → pandas.read_html()
+               4. Detecção de CSV/TSV disfarçado → pandas.read_csv() com sep auto
+               5. Varredura linha-a-linha para encontrar cabeçalho em qualquer linha
 """
 
 from __future__ import annotations
-import io, unicodedata, hashlib
+import io, unicodedata, hashlib, zipfile, chardet
 import pandas as pd
 import streamlit as st
 from data.db import salvar_cache_pecas, ler_cache_pecas
@@ -60,56 +68,185 @@ def criar_mock_pecas() -> pd.DataFrame:
 
 # ── Processamento da planilha Senior ─────────────────────────
 
-_SENIOR_HEADER_KEYS = {"Emissao", "Produto", "Vlr.Liq.", "Emissão", "Emissao_"}
+_SENIOR_HEADER_KEYS = {"Emissao", "Produto", "Vlr.Liq.", "Emissao_", "Emissao",
+                       "Data", "Codigo", "Descricao", "Cliente_Revenda",
+                       "Quantidade", "Valor_Total"}
+
+# Chaves mínimas que indicam que encontramos o cabeçalho correto
+_SENIOR_HEADER_MIN  = {"Emissao", "Produto", "Vlr.Liq.", "Emissao_", "Emissao"}
+
+
+def _detectar_encoding(file_bytes: bytes) -> str:
+    """Detecta encoding do arquivo via chardet; fallback para latin-1."""
+    try:
+        result = chardet.detect(file_bytes[:20_000])
+        enc = result.get("encoding") or "latin-1"
+        # latin-1 nunca falha — use como fallback seguro
+        return enc if enc.lower() not in ("ascii",) else "latin-1"
+    except Exception:
+        return "latin-1"
+
+
+def _eh_zip_valido(file_bytes: bytes) -> bool:
+    """Verifica se os bytes formam um ZIP válido (xlsx real = ZIP + OpenXML)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+            return "xl/workbook.xml" in z.namelist()
+    except Exception:
+        return False
+
+
+def _tentar_como_html(file_bytes: bytes) -> pd.DataFrame | None:
+    """
+    O Senior às vezes exporta como HTML com extensão .xlsx.
+    Tenta pd.read_html() nos bytes brutos.
+    """
+    try:
+        enc = _detectar_encoding(file_bytes)
+        texto = file_bytes.decode(enc, errors="replace")
+        # Só tenta se parecer com HTML
+        if "<table" not in texto.lower() and "<TABLE" not in texto:
+            return None
+        tabelas = pd.read_html(io.StringIO(texto), decimal=",", thousands=".")
+        if not tabelas:
+            return None
+        # Pega a maior tabela (a de dados)
+        df = max(tabelas, key=len)
+        return df if len(df) > 1 else None
+    except Exception:
+        return None
+
+
+def _tentar_como_csv(file_bytes: bytes) -> pd.DataFrame | None:
+    """
+    Tenta ler como CSV/TSV — Senior exporta algumas versões assim.
+    Detecta separador automaticamente.
+    """
+    enc = _detectar_encoding(file_bytes)
+    texto = file_bytes.decode(enc, errors="replace")
+
+    for sep in (";", "\t", ","):
+        try:
+            df = pd.read_csv(
+                io.StringIO(texto),
+                sep=sep,
+                header=0,
+                encoding=enc,
+                on_bad_lines="skip",
+                dtype=str,
+            )
+            # Precisa ter pelo menos 3 colunas para ser um relatório real
+            if len(df.columns) >= 3 and len(df) > 0:
+                return df
+        except Exception:
+            continue
+    return None
+
+
+def _varrer_linhas_para_cabecalho(file_bytes: bytes, engine: str,
+                                   max_linhas: int = 30) -> pd.DataFrame | None:
+    """
+    Lê o arquivo sem cabeçalho e varre as primeiras max_linhas procurando
+    alguma que contenha as palavras-chave do Senior. Retorna o DataFrame
+    com aquela linha como header.
+    """
+    try:
+        df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine=engine)
+    except Exception:
+        return None
+
+    for i in range(min(max_linhas, len(df_raw))):
+        row_vals = {_norm_col(str(v)) for v in df_raw.iloc[i].values if pd.notna(v)}
+        if row_vals & _SENIOR_HEADER_MIN:
+            try:
+                df = pd.read_excel(io.BytesIO(file_bytes), header=i, engine=engine)
+                return df
+            except Exception:
+                continue
+    return None
+
 
 def _ler_excel_robusto(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    """
+    [FIX-SENIOR] Estratégia em camadas para arquivos do Senior ERP:
+
+    Camada 1 — xlsx real (ZIP válido com xl/workbook.xml):
+      openpyxl header=4 → header=0 → calamine header=4 → header=0
+
+    Camada 2 — xls legado ou xlsx com estrutura xls (xlrd):
+      xlrd header=4 → header=0
+
+    Camada 3 — Varredura linha-a-linha (cabeçalho em posição desconhecida):
+      openpyxl → xlrd → calamine, varrendo até linha 30
+
+    Camada 4 — Arquivo HTML disfarçado de xlsx (exportação web do Senior):
+      pd.read_html()
+
+    Camada 5 — Arquivo CSV/TSV disfarçado de xlsx:
+      pd.read_csv() com detecção automática de separador
+
+    Se nenhuma camada funcionar, levanta RuntimeError com mensagem clara.
+    """
     fname_lower = file_name.lower()
+    last_err    = None
 
-    strategies = []
-    if fname_lower.endswith(".xls"):
-        strategies = [
-            {"engine": "xlrd",    "header": 4},
-            {"engine": "xlrd",    "header": 0},
-        ]
-    else:
-        strategies = [
-            {"engine": "openpyxl",  "header": 4},
-            {"engine": "openpyxl",  "header": 0},
-            {"engine": "calamine",  "header": 4},
-            {"engine": "calamine",  "header": 0},
-        ]
+    # ── Camada 1: xlsx real ───────────────────────────────────
+    xlsx_valido = _eh_zip_valido(file_bytes)
+    if xlsx_valido:
+        engines_xlsx = ["openpyxl", "calamine"]
+        for engine in engines_xlsx:
+            for header in [4, 0]:
+                try:
+                    df = pd.read_excel(
+                        io.BytesIO(file_bytes), header=header, engine=engine,
+                    )
+                    cols_norm = {_norm_col(str(c)) for c in df.columns}
+                    if cols_norm & _SENIOR_HEADER_MIN or header == 0:
+                        return df
+                except Exception as e:
+                    last_err = e
 
-    last_err = None
-    for strat in strategies:
+    # ── Camada 2: xls / xlrd ─────────────────────────────────
+    for header in [4, 0]:
         try:
             df = pd.read_excel(
-                io.BytesIO(file_bytes),
-                header=strat["header"],
-                engine=strat["engine"],
+                io.BytesIO(file_bytes), header=header, engine="xlrd",
             )
             cols_norm = {_norm_col(str(c)) for c in df.columns}
-            if cols_norm & _SENIOR_HEADER_KEYS or strat["header"] == 0:
+            if cols_norm & _SENIOR_HEADER_MIN or header == 0:
                 return df
         except Exception as e:
             last_err = e
-            continue
 
-    try:
-        df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine="openpyxl")
-        for i, row in df_raw.iterrows():
-            row_vals = {_norm_col(str(v)) for v in row.values if pd.notna(v)}
-            if row_vals & _SENIOR_HEADER_KEYS:
-                df = pd.read_excel(io.BytesIO(file_bytes), header=i, engine="openpyxl")
-                return df
-    except Exception as e:
-        last_err = e
+    # ── Camada 3: varredura linha-a-linha ─────────────────────
+    # Tenta openpyxl primeiro; se o zip for inválido, cai direto no xlrd
+    engines_varredura = (["openpyxl", "xlrd"] if not xlsx_valido
+                         else ["openpyxl", "calamine", "xlrd"])
+    for engine in engines_varredura:
+        df = _varrer_linhas_para_cabecalho(file_bytes, engine)
+        if df is not None:
+            return df
 
+    # ── Camada 4: HTML disfarçado de xlsx ─────────────────────
+    df_html = _tentar_como_html(file_bytes)
+    if df_html is not None:
+        return df_html
+
+    # ── Camada 5: CSV/TSV disfarçado de xlsx ──────────────────
+    df_csv = _tentar_como_csv(file_bytes)
+    if df_csv is not None:
+        return df_csv
+
+    # ── Nenhuma estratégia funcionou ──────────────────────────
     raise RuntimeError(
         f"Não foi possível ler a planilha '{file_name}'.\n"
         f"Último erro: {last_err}\n\n"
-        "Verifique se o arquivo foi exportado corretamente pelo Senior ERP.\n"
-        "Formatos aceitos: .xlsx (padrão) ou .xls (legado).\n"
-        "Se o arquivo for .xlsx, abra-o no Excel e salve novamente antes de fazer upload."
+        "O arquivo parece estar corrompido ou foi gerado em formato não suportado.\n"
+        "Tente uma das opções abaixo:\n"
+        "  1. Abra o arquivo no Excel e salve novamente como .xlsx antes do upload.\n"
+        "  2. No Senior ERP, exporte como .xls (formato legado) em vez de .xlsx.\n"
+        "  3. Exporte como CSV e faça upload do arquivo .csv diretamente.\n"
+        "Formatos aceitos: .xlsx, .xls, .csv"
     )
 
 
