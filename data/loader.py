@@ -339,8 +339,15 @@ def calcular_curva_abc(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
 
 
 def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
-    """Curva ABC por código de peça (coluna Produto do Senior)."""
-    _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Curva"]
+    """
+    Curva ABC por código de peça (coluna Produto do Senior).
+
+    CORRECAO: A classificacao A/B/C é calculada sobre o UNIVERSO COMPLETO
+    de pecas (Pct_Acum em relacao ao total geral). So depois os top_n sao
+    retornados para exibicao. Assim a curva reflete a real concentracao de
+    faturamento — nao apenas o recorte exibido.
+    """
+    _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Pct_Acum", "Curva"]
     if df is None or df.empty or "Codigo" not in df.columns:
         return pd.DataFrame(columns=_cols)
 
@@ -353,11 +360,16 @@ def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataF
     if grp.empty:
         return pd.DataFrame(columns=_cols)
 
-    total        = grp["Valor_Total"].sum()
-    grp["Pct"]   = grp["Valor_Total"] / total * 100
+    # Classificacao sobre universo COMPLETO
+    total           = grp["Valor_Total"].sum()
+    grp["Pct"]      = grp["Valor_Total"] / total * 100
     grp["Pct_Acum"] = grp["Pct"].cumsum()
-    grp["Curva"] = grp["Pct_Acum"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
-    return grp.head(top_n)
+    grp["Curva"]    = grp["Pct_Acum"].apply(
+        lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C")
+    )
+
+    # Retorna apenas os top_n para exibicao (curva ja correta)
+    return grp.head(top_n).reset_index(drop=True)
 
 
 def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:

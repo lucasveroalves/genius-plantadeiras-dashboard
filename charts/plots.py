@@ -287,25 +287,31 @@ def grafico_donut_pipeline(df: pd.DataFrame):
 
 def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
     """
-    Curva ABC — barras horizontais, estilo idêntico ao grafico_ranking_revendas_pecas.
-    • Top 20 peças por faturamento
-    • Ordenação: maior (topo) → menor (base)
-    • Eixo X começa em zero, sem gridlines verticais
-    • Rótulos R$ fora da barra
-    • Cores: Curva A = laranja, B = azul escalonado, C = cinza
+    Curva ABC — barras horizontais, estilo IDENTICO ao grafico_ranking_revendas_pecas.
+    Cores: A=laranja, B=azul escalonado, C=cinza.
+    Exige colunas: Codigo, Descricao_Peca, Valor_Total, Pct, Pct_Acum, Curva.
     """
     try:
-        if df_abc.empty:
-            return go.Figure()
+        if df_abc is None or df_abc.empty:
+            fig = go.Figure()
+            fig.add_annotation(text="Sem dados para Curva ABC", x=0.5, y=0.5,
+                               showarrow=False, font=dict(color=T3, size=14))
+            return _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", 480)
 
         df_abc = df_abc.copy()
-        df_abc["Valor_Total"] = pd.to_numeric(df_abc["Valor_Total"], errors="coerce").fillna(0)
-        df_abc["Pct"]         = pd.to_numeric(df_abc["Pct"],         errors="coerce").fillna(0)
-        df_abc["Pct_Acum"]    = pd.to_numeric(df_abc["Pct_Acum"],    errors="coerce").fillna(0)
+        for col in ["Valor_Total", "Pct", "Pct_Acum"]:
+            if col in df_abc.columns:
+                df_abc[col] = pd.to_numeric(df_abc[col], errors="coerce").fillna(0)
+            else:
+                df_abc[col] = 0.0
+
+        if "Curva" not in df_abc.columns:
+            df_abc["Curva"] = "A"
+
         df_abc = (df_abc[df_abc["Valor_Total"] > 0]
                   .sort_values("Valor_Total", ascending=False)
                   .head(top_n)
-                  .sort_values("Valor_Total", ascending=True)  # plotly renderiza de baixo p/ cima
+                  .sort_values("Valor_Total", ascending=True)   # plotly: menor embaixo, maior em cima
                   .reset_index(drop=True))
 
         if df_abc.empty:
@@ -314,12 +320,12 @@ def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
                                showarrow=False, font=dict(color=T3, size=14))
             return _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", 480)
 
-        # Label do eixo Y: código + descrição curta
+        # Label eixo Y: código + descrição curta
         def _ylabel(row):
             cod  = str(row.get("Codigo", "")).strip()
             desc = str(row.get("Descricao_Peca", "")).strip()
             if desc and desc not in ("", "nan", cod):
-                short = desc[:24] + "\u2026" if len(desc) > 24 else desc
+                short = desc[:26] + "…" if len(desc) > 26 else desc
                 return f"{cod} · {short}"
             return cod
 
@@ -327,26 +333,19 @@ def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
         curvas  = df_abc["Curva"].tolist()
         mx      = float(df_abc["Valor_Total"].max())
 
-        # Cor por curva: A=laranja, B=azul, C=cinza — mesma lógica de escala do ranking
-        def _cor(curva, valor, mx):
-            if curva == "A":
-                return ORG
-            if curva == "B":
-                t = valor / mx if mx else 0
-                r1, g1, b1 = int(BLU[1:3],16), int(BLU[3:5],16), int(BLU[5:7],16)
-                r2, g2, b2 = int(BLU2[1:3],16), int(BLU2[3:5],16), int(BLU2[5:7],16)
-                r = int(r1 + (r2-r1)*t); g = int(g1 + (g2-g1)*t); b = int(b1 + (b2-b1)*t)
-                return f"#{r:02x}{g:02x}{b:02x}"
-            return T3  # C
-
-        cores = [_cor(c, v, mx) for c, v in zip(curvas, df_abc["Valor_Total"])]
+        # Cor por curva — A=laranja, B=azul gradiente, C=cinza
+        COR_MAP = {"A": ORG, "B": BLU2, "C": T3}
+        cores = [COR_MAP.get(c, BLU2) for c in curvas]
 
         fig = go.Figure()
         fig.add_trace(go.Bar(
             y=ylabels,
             x=df_abc["Valor_Total"],
             orientation="h",
-            marker=dict(color=cores, line=dict(color="rgba(0,0,0,0)")),
+            marker=dict(
+                color=cores,
+                line=dict(color="rgba(0,0,0,0)"),
+            ),
             text=[_brl(v) for v in df_abc["Valor_Total"]],
             textposition="outside",
             cliponaxis=False,
@@ -366,9 +365,12 @@ def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
             )),
         ))
 
-        fig = _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", 560)
+        # Usa _base() — mesma função do ranking de revendas
+        n_items = len(df_abc)
+        altura  = max(480, 80 + n_items * 36)
+        fig = _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", altura)
 
-        # Eixo X: começa em zero, sem gridlines verticais, prefixo R$
+        # Eixo X: igual ao ranking (começa em 0, sem grid vertical, prefixo R$)
         fig.update_xaxes(
             showgrid=False,
             zeroline=False,
@@ -377,7 +379,7 @@ def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
             range=[0, mx * 1.30],
         )
 
-        # Eixo Y: sem grid, nomes não cortados
+        # Eixo Y: nomes não cortados, ordem preservada
         fig.update_yaxes(
             showgrid=False,
             categoryorder="array",
@@ -386,8 +388,12 @@ def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
             automargin=True,
         )
 
-        # Legenda de curvas
-        badges = [("A", ORG, "Curva A  ≤80%"), ("B", BLU2, "Curva B  80–95%"), ("C", T3, "Curva C  >95%")]
+        # Legenda de curvas A/B/C presentes nos dados
+        badges = [
+            ("A", ORG,  "Curva A  ≤80%"),
+            ("B", BLU2, "Curva B  80–95%"),
+            ("C", T3,   "Curva C  >95%"),
+        ]
         for k, cor, lbl in badges:
             if k in curvas:
                 fig.add_trace(go.Scatter(
