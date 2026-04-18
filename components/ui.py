@@ -39,26 +39,11 @@ def render_sidebar_uploads():
   section[data-testid="stSidebar"] > div:first-child { padding-top: 0 !important; }
 </style>""", unsafe_allow_html=True)
 
-    logo = os.path.join(os.path.dirname(__file__), "..", "assets", "genius_logo.png")
-    if os.path.exists(logo):
-        st.sidebar.markdown(
-            '<div style="display:flex;justify-content:center;padding:8px 0 4px;">',
-            unsafe_allow_html=True)
-        col_sb_l, col_sb_c, col_sb_r = st.sidebar.columns([1, 2, 1])
-        with col_sb_c:
-            st.image(logo, use_container_width=True)
-        st.sidebar.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.sidebar.markdown(
-            "<div style='text-align:center;padding:12px 0 6px;'>"
-            "<span style='font-size:1.1rem;font-weight:700;color:#E36C2C;'>🌾 Genius Implementos Agrícolas</span>"
-            "</div>", unsafe_allow_html=True)
-
     st.sidebar.markdown("---")
     st.sidebar.title("📁 Importar Planilha")
 
     with st.sidebar.expander("Upload de Arquivos", expanded=True):
-        pec = st.file_uploader("Peças (Senior ERP)", type=["xlsx", "xls", "csv"], key="up_pecas")
+        pec = st.file_uploader("Peças (Senior ERP)", type=["xlsx"], key="up_pecas")
 
     return pec
 

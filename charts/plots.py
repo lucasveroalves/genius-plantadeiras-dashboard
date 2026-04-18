@@ -286,11 +286,15 @@ def grafico_donut_pipeline(df: pd.DataFrame):
 # ════════════════════════════════════════════════════════════
 
 def grafico_curva_abc(df_abc: pd.DataFrame):
+    """
+    Gráfico de Pareto (ABC) — barras verticais por código + linha % acumulada.
+    Eixo Y esquerdo: Valor (R$) | Eixo Y direito: % acumulado (0-100%)
+    Cores: A=laranja, B=azul, C=cinza
+    """
     try:
         if df_abc.empty:
             return go.Figure()
 
-        # Garante tipos corretos — valores string causam eixo distorcido
         df_abc = df_abc.copy()
         df_abc["Valor_Total"] = pd.to_numeric(df_abc["Valor_Total"], errors="coerce").fillna(0)
         df_abc["Pct"]         = pd.to_numeric(df_abc["Pct"],         errors="coerce").fillna(0)
@@ -299,52 +303,129 @@ def grafico_curva_abc(df_abc: pd.DataFrame):
         if df_abc.empty:
             return go.Figure()
 
+        # Label: código + descrição resumida se disponível
+        def _label(row):
+            cod = str(row.get("Codigo", "")).strip()
+            desc = str(row.get("Descricao_Peca", "")).strip()
+            if desc and desc not in ("", "nan", cod):
+                return f"{cod}<br><span style='font-size:10px'>{desc[:20]}</span>"
+            return cod
+
+        labels = [_label(row) for _, row in df_abc.iterrows()]
         cores  = [ABC_COLORS.get(c, T3) for c in df_abc["Curva"]]
-        labels = [_abrev_nome(s, 22) for s in df_abc["Descricao_Peca"]]
 
         fig = go.Figure()
+
+        # ── Barras de valor (eixo y1) ──────────────────────────
         fig.add_trace(go.Bar(
-            y=labels, x=df_abc["Valor_Total"],
-            orientation="h",
+            name="Valor Faturado",
+            x=labels,
+            y=df_abc["Valor_Total"],
             marker=dict(color=cores, line=dict(color="rgba(0,0,0,0)")),
-            text=[f'{_brl(v)}  ({c})' for v, c in
-                  zip(df_abc["Valor_Total"], df_abc["Curva"])],
-            textposition="outside", cliponaxis=False,
-            textfont=dict(color=T1, size=13,
+            text=[_brl(v) for v in df_abc["Valor_Total"]],
+            textposition="outside",
+            textfont=dict(color=T1, size=11,
                           family="'Barlow Condensed','DM Sans',sans-serif"),
             hovertemplate=(
-                "<b>%{y}</b><br>Valor: %{customdata[0]}"
-                "<br>Curva: %{customdata[1]}"
-                "<br>%: %{customdata[2]:.1f}%<extra></extra>"
+                "<b>Cód: %{x}</b><br>"
+                "Valor: %{customdata[0]}<br>"
+                "Curva: %{customdata[1]}  |  %{customdata[2]:.1f}%<extra></extra>"
             ),
             customdata=list(zip(
                 [_brl(v) for v in df_abc["Valor_Total"]],
                 df_abc["Curva"],
                 df_abc["Pct"],
             )),
-            showlegend=False,
+            yaxis="y1",
         ))
-        fig = _base(fig, "Curva ABC — Peças Mais Vendidas", 560, margin_b=40)
-        fig.update_xaxes(showgrid=True, gridcolor=GRD,
-                         tickformat=",.0f", tickprefix="R$ ")
-        fig.update_yaxes(showgrid=False,
-                         categoryorder="total ascending",
-                         tickfont=dict(size=12))
-        mx = float(df_abc["Valor_Total"].max())
-        fig.update_layout(xaxis=dict(range=[0, mx * 1.32]))
 
+        # ── Linha % acumulado (eixo y2) ───────────────────────
+        fig.add_trace(go.Scatter(
+            name="% Acumulado",
+            x=labels,
+            y=df_abc["Pct_Acum"],
+            mode="lines+markers",
+            line=dict(color=T1, width=2, dash="dot"),
+            marker=dict(size=6, color=T1),
+            hovertemplate="% Acum: <b>%{y:.1f}%</b><extra></extra>",
+            yaxis="y2",
+        ))
+
+        # ── Linhas de referência 80% e 95% ───────────────────
+        for pct, label, cor in [(80, "A→B (80%)", ORG), (95, "B→C (95%)", BLU2)]:
+            fig.add_hline(
+                y=pct, line=dict(color=cor, width=1, dash="dash"),
+                annotation_text=label,
+                annotation_position="top right",
+                annotation_font=dict(color=cor, size=11),
+                yref="y2",
+            )
+
+        # ── Layout ───────────────────────────────────────────
+        n = len(df_abc)
+        altura = max(480, 380 + n * 6)
+        fig.update_layout(
+            title=dict(
+                text="Curva ABC — Peças Mais Vendidas (Pareto)",
+                font=dict(size=17, color=T1,
+                          family="'Barlow Condensed','DM Sans',sans-serif"),
+                x=0.02, xanchor="left",
+            ),
+            plot_bgcolor=CARD,
+            paper_bgcolor=CARD,
+            font=dict(family="'DM Sans',sans-serif", size=12, color=T2),
+            height=altura,
+            margin=dict(l=60, r=70, t=80, b=120),
+            bargap=0.25,
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#1A2A3A", font_size=12,
+                            font_family="'DM Sans',sans-serif", bordercolor=ORG),
+            separators=",.",
+            # Eixo Y esquerdo: valor R$
+            yaxis=dict(
+                title="Valor Faturado (R$)",
+                titlefont=dict(color=T2, size=12),
+                tickformat=",.0f",
+                tickprefix="R$ ",
+                showgrid=True,
+                gridcolor=GRD,
+                tickfont=dict(color=T2, size=11),
+            ),
+            # Eixo Y direito: % acumulado
+            yaxis2=dict(
+                title="% Acumulado",
+                titlefont=dict(color=T1, size=12),
+                ticksuffix="%",
+                range=[0, 105],
+                overlaying="y",
+                side="right",
+                showgrid=False,
+                tickfont=dict(color=T1, size=11),
+            ),
+            # Legenda compacta
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02,
+                xanchor="right", x=1,
+                font=dict(size=12, color=T2),
+                bgcolor="rgba(0,0,0,0)",
+            ),
+            xaxis=dict(
+                tickangle=-40,
+                tickfont=dict(color=T2, size=11),
+                showgrid=False,
+            ),
+        )
+
+        # Legenda de curvas
         for curva, cor in ABC_COLORS.items():
             fig.add_trace(go.Scatter(
                 x=[None], y=[None], mode="markers",
                 name=f"Curva {curva}",
                 marker=dict(color=cor, size=10, symbol="square"),
                 showlegend=True,
+                yaxis="y1",
             ))
-        fig.update_layout(
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1,
-                        font=dict(size=12, color=T2))
-        )
+
         return fig
     except Exception as e:
         st.error(f"Erro curva ABC: {e}")

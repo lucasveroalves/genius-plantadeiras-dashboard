@@ -131,30 +131,6 @@ def painel_usuario():
     label = "Comercial" if perfil == "comercial" else "PCP"
     adm_badge = ' <span style="color:#E36C2C;font-size:10px;">★ Admin</span>' if admin else ""
 
-    import os, base64 as _b64s
-    def _sb_logo():
-        for p in [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "genius_logo.png"),
-            os.path.join(os.getcwd(), "assets", "genius_logo.png"),
-        ]:
-            if os.path.exists(p):
-                with open(p, "rb") as _f:
-                    return _b64s.b64encode(_f.read()).decode()
-        return None
-
-    _ldata = _sb_logo()
-    if _ldata:
-        st.sidebar.markdown(
-            '<div style="display:flex;justify-content:center;padding:8px 0 4px;">'
-            f'<img src="data:image/png;base64,{_ldata}" style="max-width:180px;width:90%;"></div>',
-            unsafe_allow_html=True
-        )
-    else:
-        st.sidebar.markdown(
-            "<div style='text-align:center;padding:8px 0 4px;'>"
-            "<span style='font-size:1.1rem;font-weight:700;color:#E36C2C;'>🌾 Genius Implementos Agrícolas</span>"
-            "</div>", unsafe_allow_html=True)
-
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"""
 <div style='padding:6px 0 8px;'>
