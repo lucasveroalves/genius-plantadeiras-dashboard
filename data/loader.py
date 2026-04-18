@@ -21,7 +21,7 @@ Correções aplicadas:
 """
 
 from __future__ import annotations
-import io, unicodedata, hashlib, zipfile, chardet
+import io, unicodedata, hashlib, zipfile
 import pandas as pd
 import streamlit as st
 from data.db import salvar_cache_pecas, ler_cache_pecas
@@ -77,14 +77,17 @@ _SENIOR_HEADER_MIN  = {"Emissao", "Produto", "Vlr.Liq.", "Emissao_", "Emissao"}
 
 
 def _detectar_encoding(file_bytes: bytes) -> str:
-    """Detecta encoding do arquivo via chardet; fallback para latin-1."""
-    try:
-        result = chardet.detect(file_bytes[:20_000])
-        enc = result.get("encoding") or "latin-1"
-        # latin-1 nunca falha — use como fallback seguro
-        return enc if enc.lower() not in ("ascii",) else "latin-1"
-    except Exception:
-        return "latin-1"
+    """
+    Detecta encoding sem dependências externas.
+    Testa utf-8-sig → utf-8 → latin-1 (nunca falha).
+    """
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            file_bytes[:20_000].decode(enc)
+            return enc
+        except (UnicodeDecodeError, Exception):
+            continue
+    return "latin-1"
 
 
 def _eh_zip_valido(file_bytes: bytes) -> bool:
