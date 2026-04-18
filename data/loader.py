@@ -193,7 +193,7 @@ def _ler_excel_robusto(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     fname_lower = file_name.lower()
     last_err    = None
 
-    # ── Camada 1: xlsx real ───────────────────────────────────
+    # ── Camada 1: xlsx real (ZIP válido) ─────────────────────
     xlsx_valido = _eh_zip_valido(file_bytes)
     if xlsx_valido:
         engines_xlsx = ["openpyxl", "calamine"]
@@ -208,12 +208,14 @@ def _ler_excel_robusto(file_bytes: bytes, file_name: str) -> pd.DataFrame:
                         return df
                 except Exception as e:
                     last_err = e
+                    continue  # sempre segue — nunca re-raise aqui
 
-    # ── Camada 2: xls / xlrd — APENAS para .xls real ─────────
-    # xlrd >= 2.0 recusa .xlsx; só tenta se a extensão for .xls
-    # OU se o arquivo não passou na validação de ZIP (falso-xlsx)
+    # ── Camada 2: xls / xlrd — APENAS para .xls puro ─────────
+    # ATENÇÃO: ".xlsx".endswith(".xls") == True — verificar extensão completa
+    # xlrd >= 2.0 rejeita .xlsx com "Excel xlsx file; not supported"
     _is_xls_ext = fname_lower.endswith(".xls") and not fname_lower.endswith(".xlsx")
-    if _is_xls_ext or not xlsx_valido:
+    # Tenta xlrd apenas se: extensão for .xls puro OU zip inválido (XLS renomeado)
+    if _is_xls_ext or (not xlsx_valido and not fname_lower.endswith(".xlsx")):
         for header in [4, 0]:
             try:
                 df = pd.read_excel(
@@ -225,9 +227,25 @@ def _ler_excel_robusto(file_bytes: bytes, file_name: str) -> pd.DataFrame:
             except Exception as e:
                 last_err = e
 
+    # ── Camada 2b: xlsx inválido — tenta xlrd mesmo com ext .xlsx ─
+    # Alguns exports do Senior são XLS binário com extensão .xlsx
+    # Só tenta se openpyxl/calamine já falharam (xlsx_valido == False)
+    if not xlsx_valido and fname_lower.endswith(".xlsx"):
+        for header in [4, 0]:
+            try:
+                df = pd.read_excel(
+                    io.BytesIO(file_bytes), header=header, engine="xlrd",
+                )
+                cols_norm = {_norm_col(str(c)) for c in df.columns}
+                if cols_norm & _SENIOR_HEADER_MIN or header == 0:
+                    return df
+            except Exception as e:
+                last_err = e  # xlrd recusou — segue para HTML/CSV
+
     # ── Camada 3: varredura linha-a-linha ─────────────────────
     engines_varredura = ["openpyxl", "calamine"]
-    if _is_xls_ext or not xlsx_valido:
+    # xlrd só entra na varredura se for .xls puro ou zip inválido não-.xlsx
+    if _is_xls_ext or (not xlsx_valido and not fname_lower.endswith(".xlsx")):
         engines_varredura.append("xlrd")
     for engine in engines_varredura:
         df = _varrer_linhas_para_cabecalho(file_bytes, engine)
