@@ -1,59 +1,50 @@
 """
-data/loader.py — Genius Implementos Agrícolas v15
+data/loader.py — Genius Implementos Agrícolas v16
 
 Correções aplicadas:
-  [FIX-BUG-4]  calcular_kpis_pecas: df_orc agora filtrado pelo mesmo período
-               que df de peças — KPIs consistentes entre faturamento e orçamentos
-  [FIX-PERF-5] limpar_moeda_brl: substituído apply() linha-a-linha por pipeline
-               vetorizado — 10-50x mais rápido para planilhas grandes (50k+ linhas)
-  [FIX-PERF-6] @st.cache_data com ttl=300 em _processar_bytes em vez de clear() global
-               — expira por entrada, não derruba cache de todos os usuários
-  [FIX-BUG-2]  tz_convert(None) mantido corretamente para dados tz-aware
-  [FIX-BUG-3]  dropna() antes de comparação de datas mantido
-  [FIX-SENIOR] _ler_excel_robusto: adicionados fallbacks para arquivos corrompidos /
-               falso-xlsx exportados pelo Senior ERP (HTML, CSV, SYLK renomeados
-               para .xlsx). Estratégias em ordem:
-               1. openpyxl / calamine (xlsx válido)
-               2. xlrd (xls legado mesmo com extensão .xlsx)
-               3. Detecção de HTML disfarçado de xlsx → pandas.read_html()
-               4. Detecção de CSV/TSV disfarçado → pandas.read_csv() com sep auto
-               5. Varredura linha-a-linha para encontrar cabeçalho em qualquer linha
+  [FIX-BUG-4]  calcular_kpis_pecas: df_orc filtrado pelo mesmo período das peças
+  [FIX-PERF-5] limpar_moeda_brl: pipeline vetorizado (10-50x mais rápido)
+  [FIX-PERF-6] @st.cache_data com ttl=300 por entrada
+  [FIX-BUG-2]  tz_convert(None) para dados tz-aware
+  [FIX-BUG-3]  dropna() antes de comparação de datas
+  [FIX-SENIOR] Reescrita completa baseada na estrutura real do Senior ERP:
+               - Cabeçalho detectado automaticamente por varredura (geralmente linha 4)
+               - Coluna "Produto"       → Codigo da peça (ex: 200001114)
+               - Coluna "Cliente"       → código numérico (ignorado)
+               - Coluna unnamed após "Cliente" → Nome do cliente → Cliente_Revenda
+               - Coluna "Emissão"       → Data_Venda
+               - Linhas "Família:" removidas automaticamente
+               - Dados da planilha ACUMULAM com lançamentos manuais (nunca sobrescrevem)
 """
 
 from __future__ import annotations
-import io, unicodedata, hashlib, zipfile
+import io, unicodedata, hashlib
 import pandas as pd
 import streamlit as st
 from data.db import salvar_cache_pecas, ler_cache_pecas
 
 
+# ── Utilitários ───────────────────────────────────────────────
+
 def _norm_col(c: str) -> str:
     return (unicodedata.normalize("NFKD", str(c))
             .encode("ascii", "ignore").decode("ascii")
-            .strip().replace(" ", "_"))
+            .strip().replace(" ", "_").replace(".", "_"))
 
 def limpar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [_norm_col(c) for c in df.columns]
     return df
 
 def limpar_moeda_brl(serie: pd.Series) -> pd.Series:
-    """
-    [FIX-PERF-5] Conversão vetorizada — substitui apply() linha-a-linha.
-    Aceita: R$ 1.234,56 | 1234.56 | 1234 | valores numéricos nativos.
-    """
-    # Se já for numérico, converte direto
+    """[FIX-PERF-5] Conversão vetorizada."""
     if pd.api.types.is_numeric_dtype(serie):
         return serie.fillna(0.0).astype(float)
-
     s = (serie.astype(str)
          .str.replace(r"R\$", "", regex=True)
          .str.replace(r"\s+", "", regex=True))
-
-    # Formato BR (ponto como milhar, vírgula como decimal): 1.234,56
     mask_br = s.str.contains(",", na=False) & ~s.str.match(r"^\d+\.\d{1,2}$", na=False)
     s_br = s[mask_br].str.replace(r"\.", "", regex=True).str.replace(",", ".", regex=False)
     s_en = s[~mask_br]
-
     result = pd.Series(index=serie.index, dtype=float)
     result[mask_br] = pd.to_numeric(s_br, errors="coerce")
     result[~mask_br] = pd.to_numeric(s_en, errors="coerce")
@@ -66,305 +57,192 @@ def criar_mock_pecas() -> pd.DataFrame:
     ])
 
 
-# ── Processamento da planilha Senior ─────────────────────────
+# ── Leitura do arquivo Senior ERP ────────────────────────────
 
-_SENIOR_HEADER_KEYS = {"Emissao", "Produto", "Vlr.Liq.", "Emissao_", "Emissao",
-                       "Data", "Codigo", "Descricao", "Cliente_Revenda",
-                       "Quantidade", "Valor_Total"}
-
-# Chaves mínimas que indicam que encontramos o cabeçalho correto
-_SENIOR_HEADER_MIN  = {"Emissao", "Produto", "Vlr.Liq.", "Emissao_", "Emissao"}
-
-
-def _detectar_encoding(file_bytes: bytes) -> str:
+def _encontrar_linha_cabecalho(df_raw: pd.DataFrame) -> int:
     """
-    Detecta encoding sem dependências externas.
-    Testa utf-8-sig → utf-8 → latin-1 (nunca falha).
+    Varre o DataFrame (lido sem header) procurando a linha que contém
+    ao menos 2 das palavras-chave do relatório Senior.
+    Retorna o índice da linha ou 4 como fallback.
     """
-    for enc in ("utf-8-sig", "utf-8"):
-        try:
-            file_bytes[:20_000].decode(enc)
-            return enc
-        except (UnicodeDecodeError, Exception):
-            continue
-    return "latin-1"
+    keywords = {"emissao", "emissao_", "produto", "vlr", "cliente",
+                "qtde", "preco", "serie", "numero"}
+    for i in range(min(20, len(df_raw))):
+        row_vals = set()
+        for v in df_raw.iloc[i].values:
+            if pd.notna(v):
+                norm = (unicodedata.normalize("NFKD", str(v))
+                        .encode("ascii", "ignore").decode("ascii")
+                        .strip().lower().replace(".", "_").replace(" ", "_"))
+                row_vals.add(norm)
+        if len(row_vals & keywords) >= 2:
+            return i
+    return 4
 
 
-def _eh_zip_valido(file_bytes: bytes) -> bool:
-    """Verifica se os bytes formam um ZIP válido (xlsx real = ZIP + OpenXML)."""
-    try:
-        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-            return "xl/workbook.xml" in z.namelist()
-    except Exception:
-        return False
-
-
-def _tentar_como_html(file_bytes: bytes) -> pd.DataFrame | None:
+def _ler_senior_xlsx(file_bytes: bytes) -> pd.DataFrame:
     """
-    O Senior às vezes exporta como HTML com extensão .xlsx.
-    Tenta pd.read_html() nos bytes brutos.
+    Lê o xlsx do Senior em duas passagens:
+    1. Sem header para detectar a linha do cabeçalho
+    2. Com header na linha detectada
     """
-    try:
-        enc = _detectar_encoding(file_bytes)
-        texto = file_bytes.decode(enc, errors="replace")
-        # Só tenta se parecer com HTML
-        if "<table" not in texto.lower() and "<TABLE" not in texto:
-            return None
-        tabelas = pd.read_html(io.StringIO(texto), decimal=",", thousands=".")
-        if not tabelas:
-            return None
-        # Pega a maior tabela (a de dados)
-        df = max(tabelas, key=len)
-        return df if len(df) > 1 else None
-    except Exception:
-        return None
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine="openpyxl")
+    header_row = _encontrar_linha_cabecalho(df_raw)
+    df = pd.read_excel(io.BytesIO(file_bytes), header=header_row, engine="openpyxl")
+    return df
 
 
-def _tentar_como_csv(file_bytes: bytes) -> pd.DataFrame | None:
+def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Tenta ler como CSV/TSV — Senior exporta algumas versões assim.
-    Detecta separador automaticamente.
+    Normaliza o DataFrame bruto do Senior para o schema interno.
+
+    Regra especial para Cliente_Revenda:
+      Senior exporta CÓDIGO em "Cliente" e NOME na coluna unnamed seguinte.
+      Precisamos do NOME para o Top 10 Revendas.
     """
-    enc = _detectar_encoding(file_bytes)
-    texto = file_bytes.decode(enc, errors="replace")
+    # ── Passo 1: capturar coluna de nome do cliente ANTES de normalizar ──
+    cols_orig = list(df.columns)
+    nome_cliente_col_orig = None
+    for i, col in enumerate(cols_orig):
+        if str(col).strip().lower() == "cliente":
+            if i + 1 < len(cols_orig):
+                prox = str(cols_orig[i + 1]).strip()
+                # Coluna unnamed ou vazia após "Cliente" = nome do cliente
+                if prox.startswith("Unnamed") or prox == "" or prox.lower() == "nan":
+                    nome_cliente_col_orig = cols_orig[i + 1]
+            break
 
-    for sep in (";", "\t", ","):
-        try:
-            df = pd.read_csv(
-                io.StringIO(texto),
-                sep=sep,
-                header=0,
-                encoding=enc,
-                on_bad_lines="skip",
-                dtype=str,
-            )
-            # Precisa ter pelo menos 3 colunas para ser um relatório real
-            if len(df.columns) >= 3 and len(df) > 0:
-                return df
-        except Exception:
-            continue
-    return None
+    # ── Passo 2: normalizar nomes de colunas ─────────────────────────
+    df = limpar_colunas(df)
 
+    # Nome normalizado da coluna do cliente (para usar no rename_map)
+    nome_cliente_col_norm = (_norm_col(str(nome_cliente_col_orig))
+                             if nome_cliente_col_orig is not None else None)
 
-def _varrer_linhas_para_cabecalho(file_bytes: bytes, engine: str,
-                                   max_linhas: int = 30) -> pd.DataFrame | None:
-    """
-    Lê o arquivo sem cabeçalho e varre as primeiras max_linhas procurando
-    alguma que contenha as palavras-chave do Senior. Retorna o DataFrame
-    com aquela linha como header.
-    """
-    try:
-        df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine=engine)
-    except Exception:
-        return None
+    # ── Passo 3: renomear para schema interno ────────────────────────
+    mapeamento = {
+        "Emissao":           "Data_Venda",
+        "Emissao_":          "Data_Venda",   # "Emissão" → após _norm_col
+        "Data":              "Data_Venda",
+        "Produto":           "Codigo",
+        "Qtde_Fat_":         "Quantidade",
+        "Quantidade":        "Quantidade",
+        "Preco_Un_":         "Valor_Unitario",
+        "Vlr_Liq_":          "Valor_Total",
+        "Descricao":         "Descricao_Peca",
+        "Descricao_Produto": "Descricao_Peca",
+    }
 
-    for i in range(min(max_linhas, len(df_raw))):
-        row_vals = {_norm_col(str(v)) for v in df_raw.iloc[i].values if pd.notna(v)}
-        if row_vals & _SENIOR_HEADER_MIN:
+    # Mapeia a coluna de nome do cliente identificada acima
+    if nome_cliente_col_norm and nome_cliente_col_norm in df.columns:
+        mapeamento[nome_cliente_col_norm] = "Cliente_Revenda"
+    elif "Cliente" in df.columns:
+        # Fallback: usa o campo "Cliente" (código numérico) se não achou o nome
+        mapeamento["Cliente"] = "Cliente_Revenda"
+
+    rename_map = {k: v for k, v in mapeamento.items()
+                  if k in df.columns and k != v}
+    df = df.rename(columns=rename_map)
+
+    # ── Passo 4: remover linhas de agrupamento por Família ───────────
+    if "Serie" in df.columns:
+        df = df[~df["Serie"].astype(str).str.strip().str.lower().isin(
+            ["família:", "familia:", "familia", "família", "famlia:"]
+        )]
+    if "Codigo" in df.columns:
+        df = df[~df["Codigo"].astype(str).str.contains(
+            r"Família|Familia|^nan$", na=False, regex=True
+        )]
+
+    # ── Passo 5: filtrar apenas linhas com código de peça válido ─────
+    if "Codigo" in df.columns:
+        df = df.dropna(subset=["Codigo"])
+        # Produto vem como float (200001114.0) do Excel — converter para int string
+        def _norm_codigo(v):
             try:
-                df = pd.read_excel(io.BytesIO(file_bytes), header=i, engine=engine)
-                return df
+                return str(int(float(str(v).strip())))
             except Exception:
-                continue
-    return None
+                return str(v).strip()
+        df["Codigo"] = df["Codigo"].apply(_norm_codigo)
+        df = df[df["Codigo"] != ""]
+        df = df[df["Codigo"].str.lower() != "nan"]
+        # Códigos Senior são numéricos (ex: 200001114)
+        df = df[df["Codigo"].str.match(r"^\d+$", na=False)]
+
+    if df.empty:
+        return df
+
+    # ── Passo 6: converter tipos ──────────────────────────────────────
+    if "Quantidade" in df.columns:
+        df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
+
+    for col in ["Valor_Unitario", "Valor_Total"]:
+        if col in df.columns:
+            df[col] = limpar_moeda_brl(df[col])
+
+    if "Data_Venda" in df.columns:
+        df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
+        if df["Data_Venda"].dt.tz is not None:
+            df["Data_Venda"] = df["Data_Venda"].dt.tz_convert(None)
+        df = df.dropna(subset=["Data_Venda"])
+
+    # ── Passo 7: limpar Cliente_Revenda ──────────────────────────────
+    if "Cliente_Revenda" not in df.columns:
+        df["Cliente_Revenda"] = "Não informado"
+    else:
+        df["Cliente_Revenda"] = (df["Cliente_Revenda"]
+                                 .fillna("Não informado")
+                                 .astype(str).str.strip())
+        df.loc[df["Cliente_Revenda"].isin(["", "nan"]), "Cliente_Revenda"] = "Não informado"
+
+    # ── Passo 8: colunas obrigatórias ─────────────────────────────────
+    df["Status_Peca"] = "Faturado"
+    for col in ["Codigo", "Descricao_Peca", "Quantidade", "Valor_Unitario",
+                "Valor_Total", "Cliente_Revenda", "Data_Venda", "Status_Peca"]:
+        if col not in df.columns:
+            df[col] = "" if col not in ["Quantidade", "Valor_Unitario", "Valor_Total"] else 0.0
+
+    return df.reset_index(drop=True)
 
 
-def _ler_excel_robusto(file_bytes: bytes, file_name: str) -> pd.DataFrame:
-    """
-    [FIX-SENIOR] Estratégia em camadas para arquivos do Senior ERP:
-
-    Camada 1 — xlsx real (ZIP válido com xl/workbook.xml):
-      openpyxl header=4 → header=0 → calamine header=4 → header=0
-
-    Camada 2 — xls legado ou xlsx com estrutura xls (xlrd):
-      xlrd header=4 → header=0
-
-    Camada 3 — Varredura linha-a-linha (cabeçalho em posição desconhecida):
-      openpyxl → xlrd → calamine, varrendo até linha 30
-
-    Camada 4 — Arquivo HTML disfarçado de xlsx (exportação web do Senior):
-      pd.read_html()
-
-    Camada 5 — Arquivo CSV/TSV disfarçado de xlsx:
-      pd.read_csv() com detecção automática de separador
-
-    Se nenhuma camada funcionar, levanta RuntimeError com mensagem clara.
-    """
-    fname_lower = file_name.lower()
-    last_err    = None
-
-    # ── Camada 1: xlsx real (ZIP válido) ─────────────────────
-    xlsx_valido = _eh_zip_valido(file_bytes)
-    if xlsx_valido:
-        engines_xlsx = ["openpyxl", "calamine"]
-        for engine in engines_xlsx:
-            for header in [4, 0]:
-                try:
-                    df = pd.read_excel(
-                        io.BytesIO(file_bytes), header=header, engine=engine,
-                    )
-                    cols_norm = {_norm_col(str(c)) for c in df.columns}
-                    if cols_norm & _SENIOR_HEADER_MIN or header == 0:
-                        return df
-                except Exception as e:
-                    last_err = e
-                    continue  # sempre segue — nunca re-raise aqui
-
-    # ── Camada 2: xls / xlrd — APENAS para .xls puro ─────────
-    # ATENÇÃO: ".xlsx".endswith(".xls") == True — verificar extensão completa
-    # xlrd >= 2.0 rejeita .xlsx com "Excel xlsx file; not supported"
-    _is_xls_ext = fname_lower.endswith(".xls") and not fname_lower.endswith(".xlsx")
-    # Tenta xlrd apenas se: extensão for .xls puro OU zip inválido (XLS renomeado)
-    if _is_xls_ext or (not xlsx_valido and not fname_lower.endswith(".xlsx")):
-        for header in [4, 0]:
-            try:
-                df = pd.read_excel(
-                    io.BytesIO(file_bytes), header=header, engine="xlrd",
-                )
-                cols_norm = {_norm_col(str(c)) for c in df.columns}
-                if cols_norm & _SENIOR_HEADER_MIN or header == 0:
-                    return df
-            except Exception as e:
-                last_err = e
-
-    # ── Camada 2b: xlsx inválido — tenta xlrd mesmo com ext .xlsx ─
-    # Alguns exports do Senior são XLS binário com extensão .xlsx
-    # Só tenta se openpyxl/calamine já falharam (xlsx_valido == False)
-    if not xlsx_valido and fname_lower.endswith(".xlsx"):
-        for header in [4, 0]:
-            try:
-                df = pd.read_excel(
-                    io.BytesIO(file_bytes), header=header, engine="xlrd",
-                )
-                cols_norm = {_norm_col(str(c)) for c in df.columns}
-                if cols_norm & _SENIOR_HEADER_MIN or header == 0:
-                    return df
-            except Exception as e:
-                last_err = e  # xlrd recusou — segue para HTML/CSV
-
-    # ── Camada 3: varredura linha-a-linha ─────────────────────
-    engines_varredura = ["openpyxl", "calamine"]
-    # xlrd só entra na varredura se for .xls puro ou zip inválido não-.xlsx
-    if _is_xls_ext or (not xlsx_valido and not fname_lower.endswith(".xlsx")):
-        engines_varredura.append("xlrd")
-    for engine in engines_varredura:
-        df = _varrer_linhas_para_cabecalho(file_bytes, engine)
-        if df is not None:
-            return df
-
-    # ── Camada 4: HTML disfarçado de xlsx ─────────────────────
-    df_html = _tentar_como_html(file_bytes)
-    if df_html is not None:
-        return df_html
-
-    # ── Camada 5: CSV/TSV disfarçado de xlsx ──────────────────
-    df_csv = _tentar_como_csv(file_bytes)
-    if df_csv is not None:
-        return df_csv
-
-    # ── Nenhuma estratégia funcionou ──────────────────────────
-    raise RuntimeError(
-        f"Não foi possível ler a planilha '{file_name}'.\n"
-        f"Último erro: {last_err}\n\n"
-        "O arquivo parece estar corrompido ou foi gerado em formato não suportado.\n"
-        "Tente uma das opções abaixo:\n"
-        "  1. Abra o arquivo no Excel e salve novamente como .xlsx antes do upload.\n"
-        "  2. No Senior ERP, exporte como .xls (formato legado) em vez de .xlsx.\n"
-        "  3. Exporte como CSV e faça upload do arquivo .csv diretamente.\n"
-        "Formatos aceitos: .xlsx, .xls, .csv"
-    )
-
+# ── Cache e processamento ─────────────────────────────────────
 
 def _file_hash(file_bytes: bytes) -> str:
-    """MD5 rápido para usar como chave de cache em vez de serializar megabytes."""
     return hashlib.md5(file_bytes).hexdigest()
 
 
-# [FIX-PERF-6] ttl=300 (5 min) por entrada — não usa clear() global
 @st.cache_data(show_spinner=False, ttl=300)
 def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str) -> tuple[pd.DataFrame, bool]:
-    """
-    O argumento file_hash é usado como chave de cache pelo Streamlit.
-    file_bytes é passado apenas para processamento; file_hash garante que
-    dois arquivos diferentes sempre re-processem.
-    """
+    """[FIX-PERF-6] TTL=300s por entrada. file_hash = chave de cache."""
     try:
-        df = _ler_excel_robusto(file_bytes, file_name)
+        df_raw = _ler_senior_xlsx(file_bytes)
+        df     = _processar_senior(df_raw)
 
-        df = limpar_colunas(df)
+        if df.empty:
+            st.warning(
+                f"⚠️ A planilha '{file_name}' foi lida mas nenhum registro de peça foi encontrado.\n"
+                "Verifique se há linhas com código de produto numérico (ex: 200001114)."
+            )
+            return criar_mock_pecas(), True
 
-        mapeamento_norm = {
-            "Emissao":          "Data_Venda",
-            "Emissao_":         "Data_Venda",
-            "Data":             "Data_Venda",
-            "Produto":          "Codigo",
-            "Qtde.Fat.":        "Quantidade",
-            "Qtde_Fat_":        "Quantidade",
-            "Quantidade":       "Quantidade",
-            "Preco_Un.":        "Valor_Unitario",
-            "Preco_Un_":        "Valor_Unitario",
-            "Vlr.Liq.":         "Valor_Total",
-            "Vlr_Liq_":         "Valor_Total",
-            "Cliente/Revenda":  "Cliente_Revenda",
-            "Cliente_Revenda":  "Cliente_Revenda",
-            "Razao_Social":     "Cliente_Revenda",
-            "Cliente":          "Cliente_Revenda",
-            "Descricao":        "Descricao_Peca",
-            "Descricao_Produto":"Descricao_Peca",
-        }
+        return df, False
 
-        rename_map = {}
-        for col in df.columns:
-            if col.startswith("Unnamed") and "Descricao_Peca" not in df.columns:
-                rename_map[col] = "Descricao_Peca"
-        for k, v in mapeamento_norm.items():
-            if k in df.columns and k != v:
-                rename_map[k] = v
-        df = df.rename(columns=rename_map)
-
-        if "Codigo" in df.columns:
-            df = df[~df["Codigo"].astype(str).str.contains(
-                "Família:|Familia:|^nan$", na=False, regex=True)]
-        df = df.dropna(subset=["Codigo"])
-        df = df[df["Codigo"].astype(str).str.strip() != ""]
-
-        if "Quantidade" in df.columns:
-            df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
-        for col in ["Valor_Unitario", "Valor_Total"]:
-            if col in df.columns:
-                df[col] = limpar_moeda_brl(df[col])
-
-        if "Data_Venda" in df.columns:
-            df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
-            if df["Data_Venda"].dt.tz is not None:
-                df["Data_Venda"] = df["Data_Venda"].dt.tz_convert(None)
-            df = df.dropna(subset=["Data_Venda"])
-            df = df[df["Data_Venda"] >= "2024-01-01"]
-
-        if "Cliente_Revenda" not in df.columns:
-            df["Cliente_Revenda"] = "Não informado"
-        df["Status_Peca"] = "Faturado"
-
-        for col in ["Codigo", "Descricao_Peca", "Quantidade", "Valor_Unitario",
-                    "Valor_Total", "Cliente_Revenda", "Data_Venda", "Status_Peca"]:
-            if col not in df.columns:
-                df[col] = "" if col not in ["Quantidade", "Valor_Unitario", "Valor_Total"] else 0.0
-
-        return df.reset_index(drop=True), False
-
-    except RuntimeError as e:
-        st.warning(str(e))
-        return criar_mock_pecas(), True
     except Exception as e:
-        st.error(f"Erro ao processar planilha de peças: {e}")
+        st.error(
+            f"❌ Erro ao processar '{file_name}': {e}\n\n"
+            "Tente abrir o arquivo no Excel, salvar novamente como .xlsx e fazer upload."
+        )
         return criar_mock_pecas(), True
 
 
 def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
+    """
+    [FIX-ACUMULO] Dados da planilha são base histórica.
+    Lançamentos manuais futuros SOMAM por cima — nunca sobrescrevem.
+    """
     if _uploaded_file is not None:
         _uploaded_file.seek(0)
         file_bytes = _uploaded_file.read()
-        # [FIX-PERF-5] Passa hash como chave explícita de cache
         fhash = _file_hash(file_bytes)
         df, is_mock = _processar_bytes(fhash, file_bytes, _uploaded_file.name)
         if not is_mock:
@@ -388,142 +266,111 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
     return criar_mock_pecas(), True
 
 
-# ── KPIs de Peças ─────────────────────────────────────────────
+# ── KPIs ──────────────────────────────────────────────────────
 
 def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
                         data_inicio=None, data_fim=None) -> dict:
-    """
-    [FIX-BUG-4] df_orc agora filtrado pelo mesmo período de datas que df (peças),
-    usando Data_Orcamento. Isso garante consistência entre KPIs de faturamento ERP
-    e orçamentos.
-
-    Parâmetros adicionais:
-      data_inicio, data_fim — objetos date para filtrar df_orc (opcional).
-                              Se None, usa min/max do df de peças.
-    """
+    """[FIX-BUG-4] df_orc filtrado pelo mesmo período de datas que df."""
     _zero = {"total_faturado": 0, "total_pedidos": 0,
              "volume_itens": 0, "ticket_medio": 0, "qtd_skus": 0,
              "em_orcamento": 0}
 
     if df is None or df.empty:
         fat = pd.DataFrame()
-        faturamento = 0.0
-        volume      = 0.0
-        n           = 0
-        qtd_skus    = 0
+        faturamento = volume = 0.0
+        n = qtd_skus = 0
     else:
-        if "Status_Peca" in df.columns:
-            fat = df[df["Status_Peca"] == "Faturado"].copy()
-            if fat.empty:
-                fat = df.copy()
-        else:
+        fat = df[df["Status_Peca"] == "Faturado"].copy() if "Status_Peca" in df.columns else df.copy()
+        if fat.empty:
             fat = df.copy()
-
-        faturamento = pd.to_numeric(fat["Valor_Total"], errors="coerce").fillna(0).sum()
-        volume      = pd.to_numeric(fat["Quantidade"], errors="coerce").fillna(0).sum() \
-                      if "Quantidade" in fat.columns else 0.0
+        faturamento = pd.to_numeric(fat.get("Valor_Total", pd.Series(dtype=float)),
+                                    errors="coerce").fillna(0).sum()
+        volume      = pd.to_numeric(fat.get("Quantidade", pd.Series(dtype=float)),
+                                    errors="coerce").fillna(0).sum()
         n           = len(fat)
         qtd_skus    = fat["Codigo"].nunique() if "Codigo" in fat.columns else 0
 
-        # Determina período do filtro para aplicar nos orçamentos
         if data_inicio is None and not fat.empty and "Data_Venda" in fat.columns:
             try:
                 data_inicio = fat["Data_Venda"].min().date()
                 data_fim    = fat["Data_Venda"].max().date()
             except Exception:
-                data_inicio = data_fim = None
+                pass
 
     em_orcamento = 0.0
     if df_orc is not None and not df_orc.empty and "Status_Orc" in df_orc.columns:
-        df_orc_filtrado = df_orc.copy()
-
-        # [FIX-BUG-4] Filtra orçamentos pelo mesmo período das peças
-        if data_inicio is not None and data_fim is not None and "Data_Orcamento" in df_orc.columns:
+        df_orc_f = df_orc.copy()
+        if data_inicio is not None and "Data_Orcamento" in df_orc.columns:
             try:
-                datas_orc = pd.to_datetime(df_orc_filtrado["Data_Orcamento"],
-                                           errors="coerce", dayfirst=True)
-                df_orc_filtrado = df_orc_filtrado[
-                    (datas_orc.dt.date >= data_inicio) &
-                    (datas_orc.dt.date <= data_fim)
-                ]
+                d = pd.to_datetime(df_orc_f["Data_Orcamento"], errors="coerce", dayfirst=True)
+                df_orc_f = df_orc_f[(d.dt.date >= data_inicio) & (d.dt.date <= data_fim)]
             except Exception:
                 pass
-
-        fechados = df_orc_filtrado[df_orc_filtrado["Status_Orc"] == "Fechado"]
-        faturamento += pd.to_numeric(fechados["Valor_Total"], errors="coerce").fillna(0).sum()
-        volume      += pd.to_numeric(fechados.get("Quantidade", pd.Series(dtype=float)),
+        fechados = df_orc_f[df_orc_f["Status_Orc"] == "Fechado"]
+        faturamento += pd.to_numeric(fechados.get("Valor_Total", pd.Series(dtype=float)),
+                                     errors="coerce").fillna(0).sum()
+        aguardando   = df_orc_f[df_orc_f["Status_Orc"] == "Aguardando"]
+        em_orcamento = pd.to_numeric(aguardando.get("Valor_Total", pd.Series(dtype=float)),
                                      errors="coerce").fillna(0).sum()
 
-        aguardando   = df_orc_filtrado[df_orc_filtrado["Status_Orc"] == "Aguardando"]
-        em_orcamento = pd.to_numeric(aguardando["Valor_Total"], errors="coerce").fillna(0).sum()
-
-    ticket = faturamento / n if n > 0 else 0
-
     return {
-        "total_faturado": faturamento,
-        "total_pedidos":  n,
-        "volume_itens":   volume,
-        "ticket_medio":   ticket,
-        "qtd_skus":       qtd_skus,
-        "em_orcamento":   em_orcamento,
+        "total_faturado": float(faturamento),
+        "total_pedidos":  int(n),
+        "volume_itens":   float(volume),
+        "ticket_medio":   float(faturamento / n) if n > 0 else 0.0,
+        "qtd_skus":       int(qtd_skus),
+        "em_orcamento":   float(em_orcamento),
     }
 
 
 def calcular_curva_abc(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
-    """Mantido por compatibilidade."""
     _cols = ["Descricao_Peca", "Valor_Total", "Pct", "Curva"]
     if df is None or df.empty or "Descricao_Peca" not in df.columns:
         return pd.DataFrame(columns=_cols)
-    abc = (df.groupby("Descricao_Peca")["Valor_Total"]
-             .sum().sort_values(ascending=False).reset_index())
+    abc = df.groupby("Descricao_Peca")["Valor_Total"].sum().sort_values(ascending=False).reset_index()
     abc = abc[abc["Valor_Total"] > 0].reset_index(drop=True)
     if abc.empty:
         return pd.DataFrame(columns=_cols)
-    total           = abc["Valor_Total"].sum()
-    abc["Pct"]      = (abc["Valor_Total"] / total) * 100
+    total        = abc["Valor_Total"].sum()
+    abc["Pct"]   = abc["Valor_Total"] / total * 100
     abc["Pct_Acum"] = abc["Pct"].cumsum()
-    abc["Curva"]    = abc["Pct_Acum"].apply(
-        lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
+    abc["Curva"] = abc["Pct_Acum"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
     return abc.head(top_n)
 
 
 def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    """Curva ABC por código de peça (coluna Produto do Senior)."""
     _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Curva"]
     if df is None or df.empty or "Codigo" not in df.columns:
         return pd.DataFrame(columns=_cols)
 
-    agg_dict = {"Valor_Total": ("Valor_Total", "sum")}
-    if "Descricao_Peca" in df.columns:
-        agg_dict["Descricao_Peca"] = ("Descricao_Peca", "first")
-    else:
-        agg_dict["Descricao_Peca"] = ("Codigo", "first")
+    agg = {"Valor_Total": ("Valor_Total", "sum")}
+    agg["Descricao_Peca"] = ("Descricao_Peca", "first") if "Descricao_Peca" in df.columns \
+                             else ("Codigo", "first")
 
-    grp = df.groupby("Codigo").agg(**agg_dict).reset_index()
+    grp = df.groupby("Codigo").agg(**agg).reset_index()
     grp = grp[grp["Valor_Total"] > 0].sort_values("Valor_Total", ascending=False).reset_index(drop=True)
-
     if grp.empty:
         return pd.DataFrame(columns=_cols)
 
-    total           = grp["Valor_Total"].sum()
-    grp["Pct"]      = (grp["Valor_Total"] / total) * 100
+    total        = grp["Valor_Total"].sum()
+    grp["Pct"]   = grp["Valor_Total"] / total * 100
     grp["Pct_Acum"] = grp["Pct"].cumsum()
-    grp["Curva"]    = grp["Pct_Acum"].apply(
-        lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
+    grp["Curva"] = grp["Pct_Acum"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
     return grp.head(top_n)
 
 
 def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:
+    """Top 10 revendas por faturamento — usa o NOME do cliente (col após 'Cliente' no Senior)."""
     if df is None or df.empty or "Cliente_Revenda" not in df.columns:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
 
-    top = (df.groupby("Cliente_Revenda")["Valor_Total"]
-             .sum().reset_index())
+    top = df.groupby("Cliente_Revenda")["Valor_Total"].sum().reset_index()
     top = top[
         top["Cliente_Revenda"].notna() &
-        (top["Cliente_Revenda"].astype(str).str.strip() != "") &
-        (~top["Cliente_Revenda"].astype(str).str.lower().isin(
-            ["não informado", "nao informado", "n/a", "na", "-", "—"]))
+        (~top["Cliente_Revenda"].astype(str).str.strip().isin(
+            ["", "nan", "Não informado", "Nao informado", "N/A", "NA", "-", "—"]
+        ))
     ]
     top = top[top["Valor_Total"] > 0]
-    top = top.sort_values("Valor_Total", ascending=False).head(10).reset_index(drop=True)
-    return top
+    return top.sort_values("Valor_Total", ascending=False).head(10).reset_index(drop=True)
