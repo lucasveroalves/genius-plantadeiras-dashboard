@@ -287,122 +287,146 @@ def grafico_donut_pipeline(df: pd.DataFrame):
 
 def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
     """
-    Curva ABC — barras horizontais, estilo IDENTICO ao grafico_ranking_revendas_pecas.
-    Cores: A=laranja, B=azul escalonado, C=cinza.
-    Exige colunas: Codigo, Descricao_Peca, Valor_Total, Pct, Pct_Acum, Curva.
+    Curva ABC — barras horizontais.
+    NAO usa _base() pois gráfico horizontal tem eixos invertidos em relação ao vertical.
+    Layout próprio: margem esquerda grande, eixo X com grid, eixo Y sem grid.
     """
     try:
         if df_abc is None or df_abc.empty:
             fig = go.Figure()
-            fig.add_annotation(text="Sem dados para Curva ABC", x=0.5, y=0.5,
-                               showarrow=False, font=dict(color=T3, size=14))
-            return _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", 480)
+            fig.update_layout(
+                plot_bgcolor=CARD, paper_bgcolor=CARD, height=300,
+                annotations=[dict(text="Sem dados para Curva ABC",
+                    x=0.5, y=0.5, showarrow=False, font=dict(color=T3, size=14),
+                    xref="paper", yref="paper")]
+            )
+            return fig
 
         df_abc = df_abc.copy()
         for col in ["Valor_Total", "Pct", "Pct_Acum"]:
-            if col in df_abc.columns:
-                df_abc[col] = pd.to_numeric(df_abc[col], errors="coerce").fillna(0)
-            else:
-                df_abc[col] = 0.0
-
+            df_abc[col] = pd.to_numeric(df_abc.get(col, 0), errors="coerce").fillna(0)
         if "Curva" not in df_abc.columns:
             df_abc["Curva"] = "A"
 
+        # Top N ordenado: maior valor no topo (plotly renderiza de baixo pra cima)
         df_abc = (df_abc[df_abc["Valor_Total"] > 0]
                   .sort_values("Valor_Total", ascending=False)
                   .head(top_n)
-                  .sort_values("Valor_Total", ascending=True)   # plotly: menor embaixo, maior em cima
+                  .sort_values("Valor_Total", ascending=True)
                   .reset_index(drop=True))
 
         if df_abc.empty:
             fig = go.Figure()
-            fig.add_annotation(text="Sem dados para Curva ABC", x=0.5, y=0.5,
-                               showarrow=False, font=dict(color=T3, size=14))
-            return _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", 480)
+            fig.update_layout(plot_bgcolor=CARD, paper_bgcolor=CARD, height=300)
+            return fig
 
-        # Label eixo Y: código + descrição curta
+        # Labels eixo Y
         def _ylabel(row):
             cod  = str(row.get("Codigo", "")).strip()
             desc = str(row.get("Descricao_Peca", "")).strip()
             if desc and desc not in ("", "nan", cod):
-                short = desc[:26] + "…" if len(desc) > 26 else desc
+                short = desc[:24] + "…" if len(desc) > 24 else desc
                 return f"{cod} · {short}"
-            return cod
+            return cod if cod else "—"
 
         ylabels = [_ylabel(r) for _, r in df_abc.iterrows()]
         curvas  = df_abc["Curva"].tolist()
-        mx      = float(df_abc["Valor_Total"].max())
+        valores = df_abc["Valor_Total"].tolist()
+        mx      = max(valores) if valores else 1
 
-        # Cor por curva — A=laranja, B=azul gradiente, C=cinza
         COR_MAP = {"A": ORG, "B": BLU2, "C": T3}
-        cores = [COR_MAP.get(c, BLU2) for c in curvas]
+        cores   = [COR_MAP.get(c, BLU2) for c in curvas]
 
         fig = go.Figure()
+
+        # Trace principal: barras
         fig.add_trace(go.Bar(
-            y=ylabels,
-            x=df_abc["Valor_Total"],
+            name="Valor Faturado",
             orientation="h",
-            marker=dict(
-                color=cores,
-                line=dict(color="rgba(0,0,0,0)"),
-            ),
-            text=[_brl(v) for v in df_abc["Valor_Total"]],
+            y=ylabels,
+            x=valores,
+            marker=dict(color=cores, line=dict(color="rgba(0,0,0,0)")),
+            text=[_brl(v) for v in valores],
             textposition="outside",
             cliponaxis=False,
-            textfont=dict(color=T1, size=14,
-                          family="'Barlow Condensed','DM Sans',sans-serif"),
+            textfont=dict(color=T1, size=13,
+                          family="Barlow Condensed, DM Sans, sans-serif"),
             hovertemplate=(
                 "<b>%{y}</b><br>"
                 "Valor: %{customdata[0]}<br>"
-                "Curva <b>%{customdata[1]}</b>  ·  %{customdata[2]:.1f}%  "
+                "Curva <b>%{customdata[1]}</b> · %{customdata[2]:.1f}% "
                 "(acum. %{customdata[3]:.1f}%)<extra></extra>"
             ),
             customdata=list(zip(
-                [_brl(v) for v in df_abc["Valor_Total"]],
+                [_brl(v) for v in valores],
                 curvas,
-                df_abc["Pct"],
-                df_abc["Pct_Acum"],
+                df_abc["Pct"].tolist(),
+                df_abc["Pct_Acum"].tolist(),
             )),
+            showlegend=False,
         ))
 
-        # Usa _base() — mesma função do ranking de revendas
-        n_items = len(df_abc)
-        altura  = max(480, 80 + n_items * 36)
-        fig = _base(fig, f"Curva ABC — Top {top_n} Peças Mais Vendidas", altura)
-
-        # Eixo X: igual ao ranking (começa em 0, sem grid vertical, prefixo R$)
-        fig.update_xaxes(
-            showgrid=False,
-            zeroline=False,
-            tickformat=",.0f",
-            tickprefix="R$ ",
-            range=[0, mx * 1.30],
-        )
-
-        # Eixo Y: nomes não cortados, ordem preservada
-        fig.update_yaxes(
-            showgrid=False,
-            categoryorder="array",
-            categoryarray=ylabels,
-            tickfont=dict(size=12),
-            automargin=True,
-        )
-
-        # Legenda de curvas A/B/C presentes nos dados
-        badges = [
-            ("A", ORG,  "Curva A  ≤80%"),
-            ("B", BLU2, "Curva B  80–95%"),
-            ("C", T3,   "Curva C  >95%"),
-        ]
+        # Traces fantasma para legenda A/B/C
+        badges = [("A", ORG, "Curva A ≤80%"), ("B", BLU2, "Curva B 80–95%"), ("C", T3, "Curva C >95%")]
         for k, cor, lbl in badges:
             if k in curvas:
-                fig.add_trace(go.Scatter(
-                    x=[None], y=[None], mode="markers", name=lbl,
-                    marker=dict(color=cor, size=10, symbol="square"),
+                fig.add_trace(go.Bar(
+                    name=lbl, x=[None], y=[None], orientation="h",
+                    marker=dict(color=cor),
                     showlegend=True,
                 ))
 
+        n_items = len(df_abc)
+        altura  = max(500, 100 + n_items * 38)
+
+        fig.update_layout(
+            title=dict(
+                text=f"Curva ABC — Top {top_n} Peças Mais Vendidas",
+                font=dict(size=17, color=T1,
+                          family="Barlow Condensed, DM Sans, sans-serif"),
+                x=0.01, xanchor="left",
+            ),
+            plot_bgcolor=CARD,
+            paper_bgcolor=CARD,
+            font=dict(family="DM Sans, sans-serif", size=12, color=T2),
+            height=altura,
+            margin=dict(l=260, r=30, t=72, b=50),
+            bargap=0.25,
+            barmode="overlay",
+            hovermode="y unified",
+            hoverlabel=dict(bgcolor="#1A2A3A", font_size=12, bordercolor=ORG),
+            separators=",.",
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.01,
+                xanchor="left", x=0,
+                font=dict(size=12, color=T2),
+                bgcolor="rgba(0,0,0,0)",
+            ),
+            xaxis=dict(
+                range=[0, mx * 1.32],
+                showgrid=True,
+                gridcolor=GRD,
+                gridwidth=1,
+                zeroline=True,
+                zerolinecolor=GRD,
+                tickformat=",.0f",
+                tickprefix="R$ ",
+                tickfont=dict(color=T3, size=11),
+                linecolor="rgba(0,0,0,0)",
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                tickfont=dict(color=T2, size=12),
+                automargin=True,
+                categoryorder="array",
+                categoryarray=ylabels,
+                linecolor="rgba(0,0,0,0)",
+            ),
+        )
+
         return fig
+
     except Exception as e:
         st.error(f"Erro curva ABC: {e}")
         return go.Figure()
