@@ -383,8 +383,7 @@ def grafico_curva_abc(df_abc: pd.DataFrame):
             separators=",.",
             # Eixo Y esquerdo: valor R$
             yaxis=dict(
-                title="Valor Faturado (R$)",
-                titlefont=dict(color=T2, size=12),
+                title=dict(text="Valor Faturado (R$)", font=dict(color=T2, size=12)),
                 tickformat=",.0f",
                 tickprefix="R$ ",
                 showgrid=True,
@@ -393,8 +392,7 @@ def grafico_curva_abc(df_abc: pd.DataFrame):
             ),
             # Eixo Y direito: % acumulado
             yaxis2=dict(
-                title="% Acumulado",
-                titlefont=dict(color=T1, size=12),
+                title=dict(text="% Acumulado", font=dict(color=T1, size=12)),
                 ticksuffix="%",
                 range=[0, 105],
                 overlaying="y",
