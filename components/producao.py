@@ -1,3 +1,4 @@
+from datetime import datetime
 """
 components/producao.py — Genius Plantadeiras v14 (CORRIGIDO)
 
@@ -236,7 +237,7 @@ def render_aba_pcp(df_maq=None):
     with col_exp:
         if not df_prod.empty:
             st.download_button("📤 Exportar (.xlsx)", data=exportar_producao(),
-                                file_name="ciclo_producao.xlsx",
+                                file_name=f"ciclo_producao_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True, key="prod_exp")
 

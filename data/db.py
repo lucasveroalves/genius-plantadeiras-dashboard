@@ -488,9 +488,13 @@ def exportar_revendas_estoque() -> bytes:
 # ══════════════════════════════════════════════════════════════
 
 def _cache_key() -> str:
-    """Gera chave de cache por usuário logado."""
-    usuario = st.session_state.get("usuario_atual", "anonimo")
-    return f"pecas_senior_{usuario}"
+    """Cache GLOBAL para dados compartilhados entre usuários.
+    
+    CORREÇÃO: Antes era por usuário, causando bug onde cada usuário
+    via apenas seus próprios uploads. Agora todos compartilham a mesma
+    base de dados de peças.
+    """
+    return "pecas_senior_global"
 
 def salvar_cache_pecas(df: pd.DataFrame, nome: str) -> bool:
     sb = _sb()

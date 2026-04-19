@@ -1,3 +1,4 @@
+from datetime import datetime
 """
 components/estoque.py — Genius Plantadeiras
 Versão 11.0:
@@ -384,7 +385,7 @@ def render_aba_estoque():
     st.download_button(
         label="📥 Exportar para Excel",
         data=excel_data,
-        file_name="estoque_genius.xlsx",
+        file_name=f"estoque_genius_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         key="estoque_export_btn",

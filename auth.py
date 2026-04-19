@@ -87,7 +87,8 @@ def tela_login() -> bool:
             entrar  = st.form_submit_button("Entrar", type="primary", use_container_width=True)
 
         if entrar:
-            usuarios   = ler_usuarios()
+            with st.spinner("🔐 Verificando credenciais..."):
+                usuarios   = ler_usuarios()
             user_lower = usuario.strip().lower()
             if user_lower in usuarios:
                 d = usuarios[user_lower]

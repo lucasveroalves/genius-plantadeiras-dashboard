@@ -183,7 +183,7 @@ def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
     if "Data_Venda" in df.columns:
         df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
         if df["Data_Venda"].dt.tz is not None:
-            df["Data_Venda"] = df["Data_Venda"].dt.tz_convert(None)
+            df["Data_Venda"] = df["Data_Venda"].dt.tz_localize(None)
         df = df.dropna(subset=["Data_Venda"])
 
     # ── Passo 7: limpar Cliente_Revenda ──────────────────────────────

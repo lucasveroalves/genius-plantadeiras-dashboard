@@ -1,5 +1,6 @@
+import hashlib
 """
-Utilitário para gerar hashes bcrypt das senhas dos usuários.
+Utilitário para gerar hashes SHA-256 (compatível com auth.py) das senhas dos usuários.
 Execute: python gerar_senhas.py
 Cole os hashes gerados no arquivo .streamlit/secrets.toml
 """
@@ -33,7 +34,7 @@ for usuario in USUARIOS:
         if senha != confirmacao:
             print("  ❌ As senhas não coincidem. Tente novamente.")
             continue
-        hash_gerado = bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode()
+        hash_gerado = hashlib.sha256(senha.encode()).hexdigest()
         hashes[usuario] = hash_gerado
         print(f"  ✅ Hash gerado para '{usuario}'\n")
         break

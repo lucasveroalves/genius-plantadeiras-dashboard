@@ -1,3 +1,4 @@
+from datetime import datetime
 """
 components/tab_leadtime.py — Genius Implementos Agrícolas v14
 Sub-aba: Controle de Lead Time — Orçamento → Requisição → NF
@@ -389,7 +390,7 @@ def _render_historico(df: pd.DataFrame, kpis: dict):
         st.download_button(
             "⬇️ Exportar Excel",
             data=buf.getvalue(),
-            file_name="leadtime_pecas.xlsx",
+            file_name=f"leadtime_pecas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     except Exception:
