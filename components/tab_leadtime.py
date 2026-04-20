@@ -1,6 +1,9 @@
-from datetime import datetime
 """
-components/tab_leadtime.py — Genius Implementos Agrícolas v14
+components/tab_leadtime.py — Genius Implementos Agrícolas v15 (CORRIGIDO)
+
+Correções aplicadas:
+  [FIX-SYNTAX] from datetime movido para DEPOIS do docstring
+
 Sub-aba: Controle de Lead Time — Orçamento → Requisição → NF
 
 Fluxo:
@@ -27,9 +30,10 @@ Tabela Supabase necessária:
   );
 """
 
+from __future__ import annotations
+from datetime import date, datetime
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
 from data.db import (
     ler_leadtime, adicionar_leadtime, atualizar_leadtime,
     excluir_leadtime, calcular_kpis_leadtime,
