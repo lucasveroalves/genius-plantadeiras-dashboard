@@ -1,8 +1,8 @@
-from datetime import datetime
 """
-components/producao.py — Genius Plantadeiras v14 (CORRIGIDO)
+components/producao.py — Genius Plantadeiras v15 (CORRIGIDO)
 
 Correções aplicadas:
+  [FIX-SYNTAX]  from datetime import datetime movido para ANTES do docstring
   [FIX-BUG-1]  Loop de rerun infinito eliminado: edições de data e status agora
                usam st.session_state como debounce — só salva e rerun quando o valor
                realmente mudou EM RELAÇÃO AO ESTADO ANTERIOR JÁ PERSISTIDO.
@@ -13,7 +13,7 @@ Correções aplicadas:
 """
 
 from __future__ import annotations
-from datetime import date
+from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 from data.db import (
@@ -149,13 +149,11 @@ def _tabela_inner(df: pd.DataFrame):
 
 
 # [FIX-PERF-4] Tenta usar @st.fragment para reruns parciais (Streamlit >= 1.37)
-# Se não disponível, define função normal como fallback.
 try:
     @st.fragment
     def _tabela(df: pd.DataFrame):
         _tabela_inner(df)
 except AttributeError:
-    # Streamlit < 1.37 — fallback sem isolamento de fragment
     def _tabela(df: pd.DataFrame):
         _tabela_inner(df)
 
@@ -196,7 +194,6 @@ def _form():
                 }
                 if adicionar_producao(reg):
                     st.toast("✅ Adicionado ao ciclo de produção!", icon="✅")
-                    # Limpa snapshot para sincronizar com novos dados
                     st.session_state["_prod_snapshot"] = {}
                     st.rerun()
 

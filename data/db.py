@@ -422,7 +422,12 @@ def ler_patio() -> pd.DataFrame:
     if not sb: return pd.DataFrame(columns=_COLS_PATIO)
     try:
         res = sb.table("genius_estoque_patio").select("*").order("id").execute()
-        return _to_df(res.data or [], _COLS_PATIO)
+        rows = res.data or []
+        if not rows: return pd.DataFrame(columns=_COLS_PATIO)
+        df = pd.DataFrame(rows)
+        for c in _COLS_PATIO:
+            if c not in df.columns: df[c] = ""
+        return df[["id"] + _COLS_PATIO].reset_index(drop=True)
     except Exception:
         return pd.DataFrame(columns=_COLS_PATIO)
 
@@ -446,7 +451,7 @@ def excluir_patio(row_id: int) -> bool:
 
 def exportar_patio() -> bytes:
     buf = io.BytesIO()
-    ler_patio().to_excel(buf, index=False, engine="openpyxl")
+    ler_patio().drop(columns=["id"], errors="ignore").to_excel(buf, index=False, engine="openpyxl")
     return buf.getvalue()
 
 def ler_revendas_estoque() -> pd.DataFrame:
@@ -454,7 +459,12 @@ def ler_revendas_estoque() -> pd.DataFrame:
     if not sb: return pd.DataFrame(columns=_COLS_EST_REV)
     try:
         res = sb.table("genius_estoque_revendas").select("*").order("id").execute()
-        return _to_df(res.data or [], _COLS_EST_REV)
+        rows = res.data or []
+        if not rows: return pd.DataFrame(columns=_COLS_EST_REV)
+        df = pd.DataFrame(rows)
+        for c in _COLS_EST_REV:
+            if c not in df.columns: df[c] = ""
+        return df[["id"] + _COLS_EST_REV].reset_index(drop=True)
     except Exception:
         return pd.DataFrame(columns=_COLS_EST_REV)
 
@@ -478,7 +488,7 @@ def excluir_revenda_estoque(row_id: int) -> bool:
 
 def exportar_revendas_estoque() -> bytes:
     buf = io.BytesIO()
-    ler_revendas_estoque().to_excel(buf, index=False, engine="openpyxl")
+    ler_revendas_estoque().drop(columns=["id"], errors="ignore").to_excel(buf, index=False, engine="openpyxl")
     return buf.getvalue()
 
 
