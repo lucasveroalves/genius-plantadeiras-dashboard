@@ -559,3 +559,63 @@ def exportar_revendas_estoque() -> bytes:
     buf = BytesIO()
     ler_revendas_estoque().to_excel(buf, index=False)
     return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════
+# Catálogo de Peças (tabela: catalogo_pecas)
+# ══════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600)
+def ler_catalogo_pecas() -> pd.DataFrame:
+    """Lê catálogo de peças (Codigo + Descricao) do Supabase."""
+    try:
+        todos = []
+        page_size = 1000
+        offset = 0
+        while True:
+            resp = (
+                _sb().table("catalogo_pecas")
+                .select("Codigo,Descricao")
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            batch = resp.data or []
+            todos.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return pd.DataFrame(todos) if todos else pd.DataFrame(columns=["Codigo","Descricao"])
+    except Exception as e:
+        return pd.DataFrame(columns=["Codigo","Descricao"])
+
+
+def importar_catalogo_pecas(df: pd.DataFrame) -> tuple[int, str]:
+    """
+    Importa catálogo de peças (Codigo + Descricao) para o Supabase em lotes.
+    Faz upsert usando Codigo como chave única.
+    """
+    if df is None or df.empty:
+        return 0, "DataFrame vazio."
+    try:
+        import math as _math
+        import numpy as _np
+        df = df.copy()[["Codigo","Descricao"]]
+        df["Codigo"]   = df["Codigo"].astype(str).str.strip()
+        df["Descricao"] = df["Descricao"].astype(str).str.strip()
+        df = df.dropna(subset=["Codigo"]).drop_duplicates("Codigo")
+
+        def _limpar(rec):
+            return {k: (None if isinstance(v, float) and _math.isnan(v) else v)
+                    for k, v in rec.items()}
+
+        registros = [_limpar(r) for r in df.to_dict("records")]
+        batch_size = 1000
+        n_ok = 0
+        for i in range(_math.ceil(len(registros) / batch_size)):
+            lote = registros[i*batch_size:(i+1)*batch_size]
+            resp = _sb().table("catalogo_pecas").upsert(lote, on_conflict="Codigo").execute()
+            n_ok += len(resp.data) if resp.data else len(lote)
+        ler_catalogo_pecas.clear()
+        return n_ok, "OK"
+    except Exception as e:
+        return 0, str(e)

@@ -44,8 +44,9 @@ def render_sidebar_uploads():
 
     with st.sidebar.expander("Upload de Arquivos", expanded=True):
         pec = st.file_uploader("Peças (Senior ERP)", type=["xlsx"], key="up_pecas")
+        cat = st.file_uploader("Catálogo de Peças (Descrições)", type=["xlsx"], key="up_catalogo")
 
-    return pec
+    return pec, cat
 
 
 def render_banner_mock_pecas():

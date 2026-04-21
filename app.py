@@ -34,7 +34,7 @@ from components.forms        import (
     render_formulario_revendas,
 )
 from components.nf_demo      import render_aba_nf_demo
-from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase
+from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase, importar_catalogo_pecas, ler_catalogo_pecas
 from components.tab_leadtime import render_tab_leadtime
 from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas, grafico_top_produtos
 
@@ -83,13 +83,32 @@ if not tela_login():
 # 2. Sidebar
 # ══════════════════════════════════════════════════════════════
 painel_usuario()
-_peca_file = render_sidebar_uploads()
+_peca_file, _catalogo_file = render_sidebar_uploads()
 
 # ══════════════════════════════════════════════════════════════
 # 3. Dados de Peças
 #    [DB-MIGR] Se o usuário fez upload, importa para o Supabase
 #              antes de preparar o df em memória.
 # ══════════════════════════════════════════════════════════════
+# ── Importa catálogo de descrições ───────────────────────────
+if _catalogo_file is not None and not st.session_state.get("_catalogo_importado"):
+    with st.spinner("📚 Importando catálogo de peças..."):
+        try:
+            import pandas as _pd_cat
+            df_cat = _pd_cat.read_excel(_catalogo_file, header=4)
+            df_cat = df_cat[["CÓDIGO","DESCRIÇÃO"]].dropna(subset=["CÓDIGO","DESCRIÇÃO"])
+            df_cat.columns = ["Codigo","Descricao"]
+            df_cat["Codigo"] = df_cat["Codigo"].astype(str).str.strip()
+            df_cat = df_cat[df_cat["Codigo"].str.match(r"^\d+$")]
+            n_cat, msg_cat = importar_catalogo_pecas(df_cat)
+            if msg_cat == "OK":
+                st.sidebar.success(f"✅ {n_cat} descrições importadas!")
+                st.session_state["_catalogo_importado"] = True
+            else:
+                st.sidebar.error(f"❌ Catálogo: {msg_cat}")
+        except Exception as e:
+            st.sidebar.error(f"❌ Erro ao ler catálogo: {e}")
+
 if _peca_file is not None and not st.session_state.get("_pecas_importadas"):
     with st.spinner("⬆️ Carregando planilha e importando para o banco..."):
         # preparar_pecas já faz o parse; pegamos o df bruto para upsert
@@ -103,6 +122,19 @@ if _peca_file is not None and not st.session_state.get("_pecas_importadas"):
                 st.sidebar.error(f"❌ Importação: {msg_imp}")
 
 df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
+
+# ── Enriquece df_pecas com descrições do catálogo ─────────────
+if not df_pecas.empty and not is_mock_pecas:
+    df_cat_desc = ler_catalogo_pecas()
+    if not df_cat_desc.empty:
+        col_cod = next((c for c in ["Codigo","Produto","produto"] if c in df_pecas.columns), None)
+        if col_cod:
+            df_pecas = df_pecas.copy()
+            df_pecas["_cod_str"] = df_pecas[col_cod].astype(str).str.strip()
+            df_cat_desc["Codigo"] = df_cat_desc["Codigo"].astype(str).str.strip()
+            mapa = df_cat_desc.set_index("Codigo")["Descricao"].to_dict()
+            df_pecas["Descricao_Peca"] = df_pecas["_cod_str"].map(mapa)
+            df_pecas = df_pecas.drop(columns=["_cod_str"])
 
 # ══════════════════════════════════════════════════════════════
 # 4. Header + Auto-refresh
