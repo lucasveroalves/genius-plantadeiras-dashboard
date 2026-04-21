@@ -36,7 +36,7 @@ from components.forms        import (
 from components.nf_demo      import render_aba_nf_demo
 from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase
 from components.tab_leadtime import render_tab_leadtime
-from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas
+from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas, grafico_top_produtos
 
 # ══════════════════════════════════════════════════════════════
 # PAGE CONFIG  (deve ser a PRIMEIRA chamada Streamlit)
@@ -317,6 +317,8 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
             st.subheader("📊 Curva ABC – Peças Mais Vendidas")
             if not df_abc.empty:
                 st.plotly_chart(grafico_curva_abc(df_abc_completo), use_container_width=True)
+                st.markdown("##### 🏷️ Top 15 Produtos por Faturamento")
+                st.plotly_chart(grafico_top_produtos(df_abc, top_n=15), use_container_width=True)
             else:
                 st.info("Sem dados para Curva ABC.")
         with col_rev:

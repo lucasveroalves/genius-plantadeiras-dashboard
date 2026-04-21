@@ -152,6 +152,77 @@ def grafico_curva_abc(df: pd.DataFrame) -> go.Figure:
 
 
 # ══════════════════════════════════════════════════════════════
+# Top Produtos por Código (barras horizontais)
+# ══════════════════════════════════════════════════════════════
+
+def grafico_top_produtos(df: pd.DataFrame, top_n: int = 15) -> go.Figure:
+    """
+    Barras horizontais mostrando os top produtos por faturamento.
+    Exibe: Código + Descrição, valor formatado, cor por classe A/B/C.
+    """
+    if df is None or df.empty:
+        fig = go.Figure()
+        _layout_base(fig)
+        return fig
+
+    col_cod   = next((c for c in ["Codigo","_cod","codigo"] if c in df.columns), None)
+    col_desc  = next((c for c in ["Descricao_Peca","descricao_peca"] if c in df.columns), col_cod)
+    col_valor = next((c for c in ["Valor_Total","valor_total"] if c in df.columns), None)
+    col_curva = next((c for c in ["Curva","curva"] if c in df.columns), None)
+
+    if not col_valor:
+        fig = go.Figure()
+        _layout_base(fig)
+        return fig
+
+    df = df.copy()
+    df[col_valor] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
+    df = df[df[col_valor] > 0].sort_values(col_valor, ascending=False).head(top_n)
+    df = df.sort_values(col_valor, ascending=True)  # maior no topo
+
+    # Label: Código — Descrição (truncada)
+    if col_cod and col_desc and col_cod != col_desc:
+        df["_label"] = df[col_cod].astype(str) + " — " + df[col_desc].astype(str).str[:30]
+    elif col_cod:
+        df["_label"] = df[col_cod].astype(str)
+    else:
+        df["_label"] = df[col_desc].astype(str).str[:35]
+
+    # Cor por classe
+    color_map = {"A": _LARANJA, "B": _VERDE, "C": _AZUL}
+    if col_curva:
+        colors = [color_map.get(str(c), _AZUL) for c in df[col_curva]]
+    else:
+        colors = [_LARANJA] * len(df)
+
+    fig = go.Figure(go.Bar(
+        x=df[col_valor],
+        y=df["_label"],
+        orientation="h",
+        text=df[col_valor].apply(_fmt_brl_compacto),
+        textposition="outside",
+        textfont=dict(size=10, color="#EEF2F8"),
+        marker=dict(color=colors, line=dict(width=0)),
+        cliponaxis=False,
+    ))
+
+    fig.update_layout(
+        paper_bgcolor=_PAPER,
+        plot_bgcolor=_BG,
+        font=dict(color=_TEXT, family="Inter, sans-serif", size=10),
+        margin=dict(l=10, r=80, t=20, b=10),
+        showlegend=False,
+        xaxis=dict(rangemode="tozero", showgrid=False, zeroline=False,
+                   tickfont=dict(color=_TEXT, size=9), title=None),
+        yaxis=dict(showgrid=False, zeroline=False,
+                   tickfont=dict(color="#EEF2F8", size=9), title=None, automargin=True),
+        bargap=0.2,
+        height=max(350, len(df) * 26 + 60),
+    )
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════
 # Ranking Top-10 Revendas
 # ══════════════════════════════════════════════════════════════
 
