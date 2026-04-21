@@ -47,7 +47,7 @@ def _safe_response(resp) -> list[dict]:
 # NFs em Demonstração
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_nfs() -> list[dict]:
     return _safe_response(_sb().table("nf_demo").select("*").order("id").execute())
 
@@ -76,7 +76,7 @@ def excluir_nf(row_id: int) -> bool:
 # Produção / PCP
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_producao() -> pd.DataFrame:
     data = _safe_response(_sb().table("producao").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()
@@ -166,7 +166,7 @@ def calcular_kpis_producao(df: pd.DataFrame) -> dict:
 # Orçamentos
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_orcamentos() -> pd.DataFrame:
     data = _safe_response(_sb().table("orcamentos").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()
@@ -255,7 +255,7 @@ def atualizar_usuario(login: str, campos: dict) -> bool:
 # Lead Time
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_leadtime() -> pd.DataFrame:
     data = _safe_response(_sb().table("leadtime").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()
@@ -285,7 +285,7 @@ def excluir_leadtime(row_id: int) -> bool:
 # Estoque
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_estoque() -> pd.DataFrame:
     data = _safe_response(_sb().table("estoque").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()
@@ -365,7 +365,7 @@ def importar_pecas_senior_para_supabase(
         # Substitui NaN/NaT/inf/-inf por None (JSON null)
         import numpy as np
         df = df.replace([np.inf, -np.inf], None)
-        df = df.astype(object).where(pd.notna(df), other=None)
+        df = df.where(pd.notna(df), other=None)
 
         # Converte para lista de dicionários
         registros: list[dict] = df.to_dict("records")
@@ -402,7 +402,7 @@ def importar_pecas_senior_para_supabase(
 # Revendas Cadastro (tabela: revendas_cadastro)
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_revendas_cadastro() -> pd.DataFrame:
     data = _safe_response(_sb().table("revendas_cadastro").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()
@@ -494,7 +494,7 @@ def calcular_kpis_leadtime(df: pd.DataFrame) -> dict:
 # Pátio e Revendas Estoque (tabelas: patio / revendas_estoque)
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_patio() -> pd.DataFrame:
     data = _safe_response(_sb().table("patio").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()
@@ -523,7 +523,7 @@ def exportar_patio() -> bytes:
     ler_patio().to_excel(buf, index=False)
     return buf.getvalue()
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def ler_revendas_estoque() -> pd.DataFrame:
     data = _safe_response(_sb().table("revendas_estoque").select("*").order("id").execute())
     return pd.DataFrame(data) if data else pd.DataFrame()

@@ -215,7 +215,7 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     # Não trava nas datas do df: usuário pode escolher livremente.
     hoje = date.today()
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
-    default_ini = hoje - timedelta(days=365)
+    default_ini = date(2020, 1, 1)
     default_fim = hoje
     with col_f1:
         d0 = st.date_input("De", value=default_ini, format="DD/MM/YYYY", key="peca_d0")
@@ -274,7 +274,12 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     if perfil == "comercial":
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1: _card("💰 Peças Faturadas",  _brl(kpis["total_faturado"]))
-        with c2: _card("📋 Em Orçamento",     _brl(pecas_em_orc))
+        # Orçamentos fechados somam no faturado — mostra separado para clareza
+        orc_fechados = 0.0
+        if not df_orc.empty and "Status_Orc" in df_orc.columns:
+            mask_f = df_orc["Status_Orc"] == "Fechado"
+            orc_fechados = pd.to_numeric(df_orc.loc[mask_f, "Valor_Total"], errors="coerce").fillna(0).sum()
+        with c2: _card("📋 Orc. Fechados", _brl(orc_fechados))
         with c3: _card("📦 Volume de Itens",  f"{int(kpis['volume_itens']):,}".replace(",", "."))
         with c4: _card("🎟️ Ticket Médio",     _brl(kpis["ticket_medio"]))
         with c5: _card("🏷️ SKUs Ativos",      str(kpis["qtd_skus"]))
