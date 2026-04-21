@@ -362,10 +362,11 @@ def importar_pecas_senior_para_supabase(
         for col in df.select_dtypes(include=["datetime64[ns]", "datetime64[ns, UTC]"]).columns:
             df[col] = df[col].dt.strftime("%Y-%m-%d")
 
-        # Substitui NaN/NaT/inf/-inf por None (JSON null)
-        import numpy as np
-        df = df.replace([np.inf, -np.inf], None)
-        df = df.where(pd.notna(df), other=None)
+        # Substitui NaN/NaT/inf/-inf por None — coluna a coluna (definitivo)
+        import numpy as _np
+        df = df.replace([_np.inf, -_np.inf], _np.nan)
+        for _c in list(df.columns):
+            df[_c] = df[_c].where(pd.notna(df[_c]), other=None)
 
         # Converte para lista de dicionários
         registros: list[dict] = df.to_dict("records")

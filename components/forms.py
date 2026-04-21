@@ -123,10 +123,10 @@ def render_formulario_orcamento_pecas():
         with col3:
             qtd_itens = st.number_input("Volume de Itens (qtd peças)", min_value=0, step=1, value=0)
         with col4:
-            status_orc = st.selectbox("Status", ["Aguardando","Declinado","Fechado"])
+            status_orc = st.selectbox("Status", ["Aguardando","Faturado"])
 
-        obs_orc = st.text_area("Motivo do Declínio *" if status_orc == "Declinado" else "Observações",
-                               placeholder="Descreva o motivo..." if status_orc == "Declinado" else "",
+        obs_orc = st.text_area("Observações",
+                               placeholder="",
                                height=70)
 
         submitted = st.form_submit_button("💾 Salvar Orçamento de Peças", type="primary")
@@ -144,9 +144,7 @@ def render_formulario_orcamento_pecas():
                     erro = "⚠️ Valor inválido. Use o formato: 15.000,00"
                 elif valor_orc <= 0:
                     erro = "⚠️ Valor deve ser maior que zero."
-                elif status_orc == "Declinado" and not obs_orc.strip():
-                    erro = "⚠️ Informe o motivo do declínio."
-
+    
             if erro:
                 st.toast(erro, icon="🚫")
                 st.stop()
@@ -181,12 +179,12 @@ def render_formulario_orcamento_pecas():
     kc1, kc2, kc3, kc4 = st.columns(4)
     total_val  = pd.to_numeric(df_orc["Valor_Total"], errors="coerce").fillna(0).sum()
     aguardando = int((df_orc["Status_Orc"] == "Aguardando").sum())
-    fechado    = int((df_orc["Status_Orc"] == "Fechado").sum())
-    declinado  = int((df_orc["Status_Orc"] == "Declinado").sum())
+    fechado    = int((df_orc["Status_Orc"] == "Faturado").sum())
+    
     kc1.metric("💰 Total em Orçamentos", _brl(total_val))
     kc2.metric("⏳ Aguardando",  aguardando)
-    kc3.metric("✅ Fechados",    fechado)
-    kc4.metric("❌ Declinados",  declinado)
+    kc3.metric("✅ Faturados",   fechado)
+    
 
     st.markdown("---")
 
@@ -211,16 +209,13 @@ def render_formulario_orcamento_pecas():
         cols[4].markdown(f'<div style="font-size:12px;color:#A8B8CC;padding-top:8px;">{_qtd_val:,}</div>', unsafe_allow_html=True)
 
         status_atual = str(row.get("Status_Orc","Aguardando"))
-        opcoes = ["Aguardando","Declinado","Fechado"]
+        opcoes = ["Aguardando","Faturado"]
         idx_atual = opcoes.index(status_atual) if status_atual in opcoes else 0
         novo_status = cols[5].selectbox("", opcoes, index=idx_atual,
                                          key=f"st_orc_{row_id}", label_visibility="collapsed")
         if novo_status != status_atual:
-            if novo_status == "Declinado":
-                st.session_state[f"_declinar_{row_id}"] = True
-            else:
-                atualizar_orcamento(row_id, {"Status_Orc": novo_status, "Observacoes": row.get("Observacoes","")})
-                st.rerun()
+            atualizar_orcamento(row_id, {"Status_Orc": novo_status})
+            st.rerun()
 
         cols[6].markdown(f'<div style="font-size:11px;color:#A8B8CC;padding-top:8px;">{row.get("Observacoes","") or "—"}</div>', unsafe_allow_html=True)
 
@@ -288,8 +283,7 @@ def render_formulario_revendas():
                 st.toast("✅ Revenda cadastrada!", icon="✅")
                 st.rerun()
 
-    df_rev = ler_revendas_cadastro()
-    lista = df_rev.to_dict("records") if not df_rev.empty else []
+    lista = ler_revendas_cadastro()
     if lista:
         st.divider()
         st.subheader(f"📋 Revendas Cadastradas ({len(lista)})")

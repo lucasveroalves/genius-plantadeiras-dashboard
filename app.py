@@ -273,13 +273,17 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     if perfil == "comercial":
         c1, c2, c3, c4, c5 = st.columns(5)
-        with c1: _card("💰 Peças Faturadas",  _brl(kpis["total_faturado"]))
-        # Orçamentos fechados somam no faturado — mostra separado para clareza
-        orc_fechados = 0.0
+        total_com_orc = kpis["total_faturado"] + orc_faturados
+        with c1: _card("💰 Total Faturado",  _brl(total_com_orc))
+        # Orçamentos Aguardando = pipeline pendente
+        orc_aguardando = 0.0
+        orc_faturados  = 0.0
         if not df_orc.empty and "Status_Orc" in df_orc.columns:
-            mask_f = df_orc["Status_Orc"] == "Fechado"
-            orc_fechados = pd.to_numeric(df_orc.loc[mask_f, "Valor_Total"], errors="coerce").fillna(0).sum()
-        with c2: _card("📋 Orc. Fechados", _brl(orc_fechados))
+            mask_ag = df_orc["Status_Orc"] == "Aguardando"
+            mask_fat = df_orc["Status_Orc"] == "Faturado"
+            orc_aguardando = pd.to_numeric(df_orc.loc[mask_ag, "Valor_Total"], errors="coerce").fillna(0).sum()
+            orc_faturados  = pd.to_numeric(df_orc.loc[mask_fat, "Valor_Total"], errors="coerce").fillna(0).sum()
+        with c2: _card("⏳ Orc. Aguardando", _brl(orc_aguardando))
         with c3: _card("📦 Volume de Itens",  f"{int(kpis['volume_itens']):,}".replace(",", "."))
         with c4: _card("🎟️ Ticket Médio",     _brl(kpis["ticket_medio"]))
         with c5: _card("🏷️ SKUs Ativos",      str(kpis["qtd_skus"]))
@@ -303,7 +307,16 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
                 st.info("Sem dados para Curva ABC.")
         with col_rev:
             st.subheader("🏆 Top 10 Revendas")
-            df_top10 = calcular_top10_revendas(df_filtrado)
+            # Combina planilha Senior + orçamentos manuais Faturados
+            df_orc_fat = pd.DataFrame()
+            if not df_orc.empty and "Status_Orc" in df_orc.columns:
+                df_orc_fat = df_orc[df_orc["Status_Orc"] == "Faturado"][["Cliente_Revenda","Valor_Total"]].copy()
+                df_orc_fat["Valor_Total"] = pd.to_numeric(df_orc_fat["Valor_Total"], errors="coerce").fillna(0)
+            df_para_top10 = pd.concat([
+                df_filtrado[["Cliente_Revenda","Valor_Total"]] if not df_filtrado.empty else pd.DataFrame(),
+                df_orc_fat,
+            ], ignore_index=True) if not df_orc_fat.empty else df_filtrado
+            df_top10 = calcular_top10_revendas(df_para_top10)
             if not df_top10.empty:
                 st.plotly_chart(
                     grafico_ranking_revendas_pecas(df_top10, top_n=10),
