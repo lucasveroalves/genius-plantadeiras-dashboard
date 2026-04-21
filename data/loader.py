@@ -21,7 +21,7 @@ from __future__ import annotations
 import io, unicodedata, hashlib
 import pandas as pd
 import streamlit as st
-from data.db import salvar_cache_pecas, ler_cache_pecas
+# cache de peças via session_state (salvar_cache_pecas/ler_cache_pecas removidos)
 
 
 # ── Utilitários ───────────────────────────────────────────────
@@ -248,20 +248,12 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
         if not is_mock:
             st.session_state["_pecas_df"]   = df
             st.session_state["_pecas_nome"] = _uploaded_file.name
-            salvar_cache_pecas(df, _uploaded_file.name)
         return df, is_mock
 
     if "_pecas_df" in st.session_state:
         nome = st.session_state.get("_pecas_nome", "planilha carregada")
         st.sidebar.caption(f"📂 Peças: {nome}")
         return st.session_state["_pecas_df"], False
-
-    df_sb, nome_sb = ler_cache_pecas()
-    if df_sb is not None and not df_sb.empty:
-        st.session_state["_pecas_df"]   = df_sb
-        st.session_state["_pecas_nome"] = nome_sb
-        st.sidebar.caption(f"📂 Peças: {nome_sb} (cache)")
-        return df_sb, False
 
     return criar_mock_pecas(), True
 

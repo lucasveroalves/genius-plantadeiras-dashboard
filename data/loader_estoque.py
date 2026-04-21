@@ -444,3 +444,10 @@ def calcular_kpis_orcamentos(df: pd.DataFrame) -> dict:
         "valor_aberto":   valor_aberto,
         "valor_faturado": valor_faturado,
     }
+
+
+# ── Aliases para compatibilidade com estoque.py ───────────────
+ler_revendas_estoque        = ler_revendas
+adicionar_revenda_estoque   = adicionar_revenda
+excluir_revenda_estoque     = excluir_revenda
+exportar_revendas_estoque   = exportar_revendas

@@ -1,522 +1,281 @@
 """
-charts/plots.py v10 — Genius Plantadeiras
+charts/plots.py — Genius Implementos Agrícolas v15
 
-v10:
-  • grafico_donut_pipeline: textinfo="percent" fora das fatias (textposition="outside"),
-    automargin=True elimina sobreposição, legenda compacta à direita,
-    altura 500 px para dar espaço aos labels externos
-  • Todos os outros gráficos sem alteração funcional
+Correções aplicadas:
+  [FIX-ABC]  grafico_curva_abc reconstruído com plotly.express:
+             - Barras horizontais (orientation='h')
+             - Ordena maior → topo (sort_values + category_orders)
+             - xaxis rangemode="tozero" — eixo X SEMPRE começa do zero
+             - Rótulos na ponta das barras: formato compacto R$ 1.5M / R$ 800k
+             - Grid de fundo removido; tema dark consistente
 """
 
+from __future__ import annotations
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
-# STATUS_PIPELINE definido localmente (não existe em data.loader na v11)
-STATUS_PIPELINE = [
-    "Em Negociação", "Em Aberto", "Crédito",
-    "Pronto para Faturar", "Aguardando Checklist",
-]
-
-# ── Paleta ────────────────────────────────────────────────────
-CARD = "#252B35"
-ORG  = "#D4651E"
-ORG2 = "#E8813E"
-BLU  = "#1E3A5F"
-BLU2 = "#2A5A8A"
-BLU3 = "#4A7A9C"
-GRN  = "#3D9970"
-GRN2 = "#52B788"
-TEL  = "#2A6A7A"
-PUR  = "#5A4A8A"
-YEL  = "#E8A020"
-T1   = "#EEF2F8"
-T2   = "#A8B8CC"
-T3   = "#6A7A8A"
-GRD  = "#2A3448"
-
-SCALE_MAIN = [[0.0, BLU], [0.65, BLU2], [1.0, ORG]]
-PIE_COLORS = [ORG, BLU2, BLU3, GRN, TEL, PUR, ORG2, GRN2]
-ABC_COLORS = {"A": ORG, "B": BLU2, "C": T3}
-
-_ABREV = {
-    "Pronto para Faturar":  "Pronto p/ Fat.",
-    "Aguardando Checklist": "Ag. Checklist",
-    "Em Negociação":        "Em Negoc.",
-}
 
 
-def _brl(v: float) -> str:
+# ── Paleta compartilhada ──────────────────────────────────────
+_BG    = "#12171D"
+_PAPER = "#1E262E"
+_GRID  = "#2D3748"
+_TEXT  = "#A8B8CC"
+_LARANJA = "#E67E22"
+_VERDE   = "#3D9970"
+_AZUL    = "#2A5A8A"
+
+
+def _fmt_brl_compacto(v: float) -> str:
+    """Formata valor em BRL compacto: R$ 1.5M, R$ 800k, R$ 250."""
     try:
-        i, d = f"{abs(float(v)):,.2f}".split(".")
-        return f"R$ {i.replace(',','.')},{d}"
+        v = float(v)
+        if v >= 1_000_000:
+            return f"R$ {v/1_000_000:.1f}M"
+        if v >= 1_000:
+            return f"R$ {v/1_000:.0f}k"
+        return f"R$ {v:,.0f}"
     except Exception:
-        return "R$ 0,00"
+        return "—"
 
 
-def _abrev_nome(s: str, max_len: int = 18) -> str:
-    s = _ABREV.get(s, s)
-    return s if len(s) <= max_len else s[:max_len - 1] + "…"
-
-
-def _base(fig, title: str = "", h: int = 490, margin_b: int = 60):
+def _layout_base(fig: go.Figure, title: str = "") -> go.Figure:
+    """Aplica tema dark padrão ao layout."""
     fig.update_layout(
-        title=dict(
-            text=title,
-            font=dict(size=17, color=T1,
-                      family="'Barlow Condensed','DM Sans',sans-serif"),
-            x=0.02, xanchor="left", y=0.97,
-        ),
-        plot_bgcolor=CARD,
-        paper_bgcolor=CARD,
-        font=dict(family="'DM Sans',sans-serif", size=13, color=T2),
-        height=h,
-        margin=dict(l=54, r=54, t=76, b=margin_b),
-        legend=dict(
-            bgcolor="rgba(0,0,0,0)", bordercolor=GRD, borderwidth=1,
-            font=dict(size=13, color=T2),
-        ),
-        hoverlabel=dict(
-            bgcolor="#1A2A3A", font_size=13,
-            font_family="'DM Sans',sans-serif", bordercolor=ORG,
-        ),
-        separators=",.",
-    )
-    fig.update_xaxes(
-        showgrid=False, zeroline=False,
-        tickfont=dict(color=T2, size=13), linecolor=GRD,
-    )
-    fig.update_yaxes(
-        showgrid=True, gridwidth=1, gridcolor=GRD,
-        zeroline=False, tickfont=dict(color=T3, size=12),
-        linecolor="rgba(0,0,0,0)",
+        title=dict(text=title, font=dict(color="#EEF2F8", size=14)) if title else None,
+        paper_bgcolor=_PAPER,
+        plot_bgcolor=_BG,
+        font=dict(color=_TEXT, family="Inter, sans-serif"),
+        margin=dict(l=10, r=10, t=30 if title else 10, b=10),
+        showlegend=False,
     )
     return fig
 
 
-# ════════════════════════════════════════════════════════════
-# MÁQUINAS
-# ════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# [FIX-ABC]  Curva ABC — Peças mais vendidas
+# ══════════════════════════════════════════════════════════════
 
-def grafico_status_barras(df: pd.DataFrame):
-    """Preservado mas não chamado no layout atual do dashboard."""
-    try:
-        ss = (df.groupby("Status")["Valor"].sum()
-              .reset_index().sort_values("Valor", ascending=False))
-        x_labels = [_abrev_nome(s) for s in ss["Status"]]
-        max_val  = ss["Valor"].max()
-        cores    = [ORG if v == max_val else BLU2 for v in ss["Valor"]]
-
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=x_labels, y=ss["Valor"],
-            marker=dict(color=cores, line=dict(color="rgba(0,0,0,0)")),
-            text=[_brl(v) for v in ss["Valor"]],
-            textposition="outside", cliponaxis=False,
-            textfont=dict(color=T1, size=18,
-                          family="'Barlow Condensed','DM Sans',sans-serif"),
-            hovertemplate="<b>%{x}</b><br>%{customdata}<extra></extra>",
-            customdata=[_brl(v) for v in ss["Valor"]],
-        ))
-        fig = _base(fig, "Volume Financeiro por Status", h=560, margin_b=80)
-        fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ", showgrid=False)
-        fig.update_xaxes(tickangle=-25, showgrid=False)
-        fig.update_layout(yaxis=dict(range=[0, max_val * 1.32]), bargap=0.35)
-        return fig
-    except Exception as e:
-        st.error(f"Erro barras status: {e}")
-        return go.Figure()
-
-
-def grafico_top_revendas(df: pd.DataFrame, top_n: int = 10):
-    try:
-        rs = (df.groupby("Revenda")["Valor"].sum()
-              .reset_index().sort_values("Valor", ascending=True).tail(top_n))
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            y=rs["Revenda"], x=rs["Valor"], orientation="h",
-            marker=dict(
-                color=rs["Valor"], colorscale=SCALE_MAIN,
-                showscale=False, line=dict(color="rgba(0,0,0,0)"),
-            ),
-            text=[_brl(v) for v in rs["Valor"]],
-            textposition="outside", cliponaxis=False,
-            textfont=dict(color=T1, size=14,
-                          family="'Barlow Condensed','DM Sans',sans-serif"),
-            hovertemplate="<b>%{y}</b><br>%{customdata}<extra></extra>",
-            customdata=[_brl(v) for v in rs["Valor"]],
-        ))
-        fig = _base(fig, f"Top {top_n} Revendas por Faturamento", 500)
-        fig.update_xaxes(showgrid=True, gridcolor=GRD,
-                         tickformat=",.0f", tickprefix="R$ ")
-        fig.update_yaxes(showgrid=False, autorange="reversed",
-                         tickfont=dict(size=12))
-        mx = rs["Valor"].max()
-        fig.update_layout(xaxis=dict(range=[0, mx * 1.28]))
-        return fig
-    except Exception as e:
-        st.error(f"Erro top revendas: {e}")
-        return go.Figure()
-
-
-def grafico_evolucao_temporal(df: pd.DataFrame):
-    try:
-        if "Data_Pedido" not in df.columns:
-            return None
-        dt = df.copy()
-        dt["Data_Pedido"] = pd.to_datetime(dt["Data_Pedido"], errors="coerce")
-        dt = dt.dropna(subset=["Data_Pedido"])
-        if dt.empty:
-            return None
-        if dt["Data_Pedido"].dt.tz is not None:
-            dt["Data_Pedido"] = dt["Data_Pedido"].dt.tz_localize(None)
-        dt["Semana"] = dt["Data_Pedido"].dt.to_period("W").dt.start_time
-        ev = dt.groupby("Semana")["Valor"].sum().reset_index()
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=ev["Semana"], y=ev["Valor"],
-            mode="lines+markers",
-            line=dict(color=ORG, width=2.5, shape="spline"),
-            marker=dict(size=7, color=ORG, line=dict(color=CARD, width=1.5)),
-            fill="tozeroy", fillcolor="rgba(212,101,30,.10)",
-            name="Pipeline",
-            hovertemplate="<b>%{x|%d/%m/%Y}</b><br>%{customdata}<extra></extra>",
-            customdata=[_brl(v) for v in ev["Valor"]],
-        ))
-        fig = _base(fig, "Evolução Semanal do Pipeline", 440)
-        fig.update_xaxes(tickformat="%d/%m")
-        fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ")
-        return fig
-    except Exception as e:
-        st.error(f"Erro temporal: {e}")
-        return None
-
-
-def grafico_donut_pipeline(df: pd.DataFrame):
+def grafico_curva_abc(df: pd.DataFrame) -> go.Figure:
     """
-    Donut do pipeline ativo — v11.
-    • textinfo="percent+label" dentro das fatias (radial) → sem sobreposição
-    • Sem legenda externa → donut ocupa todo o espaço disponível
-    • Margem mínima → gráfico maior e mais dinâmico
-    • Hover mostra valor R$ completo
+    Gráfico de barras horizontais para a Curva ABC de peças.
+
+    Parâmetros esperados no df:
+        - 'Codigo_Peca' ou 'Descricao'  → label do eixo Y
+        - 'Valor_Total' ou 'Quantidade' → magnitude das barras (eixo X)
+        - 'Classe' (opcional)           → cor A/B/C
+
+    Regras de exibição:
+        - Ordena descrescente → maior barra no TOPO
+        - Eixo X começa ESTRITAMENTE do zero (rangemode="tozero")
+        - Rótulos compactos no final de cada barra
+        - Sem grid de fundo
     """
-    try:
-        pf = df[df["Status"].isin(STATUS_PIPELINE)]
-        if pf.empty:
-            fig = go.Figure()
-            fig.add_annotation(
-                text="Sem dados no pipeline ativo",
-                x=0.5, y=0.5, showarrow=False,
-                font=dict(size=14, color=T3),
-            )
-            return _base(fig, "Distribuição do Pipeline Ativo", 440)
-
-        ss = (pf.groupby("Status")["Valor"].sum()
-              .reset_index().sort_values("Valor", ascending=False))
-        n     = len(ss)
-        cores = (PIE_COLORS * 4)[:n]
-
-        total = ss["Valor"].sum()
-        # Pull suave nas fatias menores para respirar
-        pull = [0.04 if (v / total) < 0.10 else 0.0 for v in ss["Valor"]]
-
+    if df is None or df.empty:
         fig = go.Figure()
-        fig.add_trace(go.Pie(
-            labels=ss["Status"],
-            values=ss["Valor"],
-            hole=0.50,
-            marker=dict(colors=cores, line=dict(color=CARD, width=2)),
-            # % + nome curto dentro, radial para não sobrepor
-            textinfo="percent+label",
-            textposition="inside",
-            insidetextorientation="radial",
-            textfont=dict(
-                size=12, color="#FFFFFF",
-                family="'Barlow Condensed','DM Sans',sans-serif",
-            ),
-            automargin=True,
-            pull=pull,
-            hovertemplate=(
-                "<b>%{label}</b><br>"
-                "%{customdata}<br>"
-                "%{percent:.1%}<extra></extra>"
-            ),
-            customdata=[_brl(v) for v in ss["Valor"]],
-            showlegend=False,       # sem legenda = mais espaço pro donut
-            direction="clockwise",
-            sort=False,
-        ))
-
-        # Valor total no centro do furo
+        _layout_base(fig)
         fig.add_annotation(
-            text=f"<b>{_brl(total)}</b><br><span style='font-size:10px'>Pipeline</span>",
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(size=13, color=T1,
-                      family="'Barlow Condensed','DM Sans',sans-serif"),
-            align="center",
-        )
-
-        fig.update_layout(
-            title=dict(
-                text="Distribuição do Pipeline Ativo",
-                font=dict(size=17, color=T1,
-                          family="'Barlow Condensed','DM Sans',sans-serif"),
-                x=0.02, xanchor="left",
-            ),
-            plot_bgcolor=CARD,
-            paper_bgcolor=CARD,
-            font=dict(family="'DM Sans',sans-serif", size=13, color=T2),
-            height=440,
-            # Margens mínimas = donut ocupa todo o espaço
-            margin=dict(l=10, r=10, t=60, b=10),
-            separators=",.",
-            hoverlabel=dict(
-                bgcolor="#1A2A3A", font_size=13,
-                font_family="'DM Sans',sans-serif", bordercolor=ORG,
-            ),
+            text="Sem dados", xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(color=_TEXT, size=14),
         )
         return fig
-    except Exception as e:
-        st.error(f"Erro donut: {e}")
-        return go.Figure()
+
+    # ── Decide coluna de label e de valor ─────────────────────
+    col_label = next(
+        (c for c in ["Descricao", "Codigo_Peca", "descricao", "codigo_peca"] if c in df.columns),
+        df.columns[0],
+    )
+    col_valor = next(
+        (c for c in ["Valor_Total", "valor_total", "Quantidade", "quantidade"] if c in df.columns),
+        df.columns[-1],
+    )
+    col_classe = next(
+        (c for c in ["Classe", "classe", "Curva", "curva"] if c in df.columns),
+        None,
+    )
+
+    df = df.copy()
+    df[col_valor] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
+    df = df[df[col_valor] > 0]
+
+    if df.empty:
+        fig = go.Figure()
+        _layout_base(fig)
+        return fig
+
+    # Ordena crescente para que maior fique no TOPO no px (eixo y invertido)
+    df = df.sort_values(col_valor, ascending=True).tail(25)
+
+    # ── Mapa de cores por classe A/B/C ─────────────────────────
+    color_map = {"A": _LARANJA, "B": _VERDE, "C": _AZUL}
+    if col_classe and col_classe in df.columns:
+        color_col = col_classe
+    else:
+        # Atribui classe pelo percentil se não existir
+        df["_classe_calc"] = pd.cut(
+            df[col_valor].rank(pct=True),
+            bins=[0, 0.2, 0.5, 1.0],
+            labels=["C", "B", "A"],
+        ).astype(str)
+        color_col = "_classe_calc"
+        color_map = {"A": _LARANJA, "B": _VERDE, "C": _AZUL}
+
+    # ── Plotly Express: barras horizontais ────────────────────
+    fig = px.bar(
+        df,
+        x=col_valor,
+        y=col_label,
+        orientation="h",
+        color=color_col,
+        color_discrete_map=color_map,
+        text=df[col_valor].apply(_fmt_brl_compacto),
+    )
+
+    # ── Estilização das barras ─────────────────────────────────
+    fig.update_traces(
+        textposition="outside",
+        textfont=dict(size=11, color="#EEF2F8"),
+        marker_line_width=0,
+        cliponaxis=False,
+    )
+
+    # ── Layout ─────────────────────────────────────────────────
+    fig.update_layout(
+        paper_bgcolor=_PAPER,
+        plot_bgcolor=_BG,
+        font=dict(color=_TEXT, family="Inter, sans-serif", size=11),
+        margin=dict(l=10, r=80, t=20, b=10),
+        showlegend=bool(col_classe),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="left", x=0,
+            font=dict(size=10, color=_TEXT),
+        ),
+        # ── [FIX-ABC] Eixo X SEMPRE começa do zero ────────────
+        xaxis=dict(
+            rangemode="tozero",        # NUNCA corta abaixo de 0
+            showgrid=False,            # Remove grid vertical
+            zeroline=False,
+            tickfont=dict(color=_TEXT, size=10),
+            title=None,
+        ),
+        yaxis=dict(
+            showgrid=False,            # Remove grid horizontal
+            zeroline=False,
+            tickfont=dict(color="#EEF2F8", size=10),
+            title=None,
+            automargin=True,
+        ),
+        bargap=0.25,
+        height=max(300, len(df) * 28 + 60),
+    )
+
+    return fig
 
 
-# ════════════════════════════════════════════════════════════
-# PEÇAS
-# ════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# Ranking Top-10 Revendas
+# ══════════════════════════════════════════════════════════════
 
-def grafico_curva_abc(df_abc: pd.DataFrame, top_n: int = 20):
+def grafico_ranking_revendas_pecas(df: pd.DataFrame, top_n: int = 10) -> go.Figure:
     """
-    Curva ABC — barras horizontais.
-    NAO usa _base() pois gráfico horizontal tem eixos invertidos em relação ao vertical.
-    Layout próprio: margem esquerda grande, eixo X com grid, eixo Y sem grid.
+    Barras horizontais — Top-N revendas por valor faturado.
+    Mesmas regras de eixo: rangemode=tozero, sem grid.
     """
-    try:
-        if df_abc is None or df_abc.empty:
-            fig = go.Figure()
-            fig.update_layout(
-                plot_bgcolor=CARD, paper_bgcolor=CARD, height=300,
-                annotations=[dict(text="Sem dados para Curva ABC",
-                    x=0.5, y=0.5, showarrow=False, font=dict(color=T3, size=14),
-                    xref="paper", yref="paper")]
-            )
-            return fig
-
-        df_abc = df_abc.copy()
-        for col in ["Valor_Total", "Pct", "Pct_Acum"]:
-            df_abc[col] = pd.to_numeric(df_abc.get(col, 0), errors="coerce").fillna(0)
-        if "Curva" not in df_abc.columns:
-            df_abc["Curva"] = "A"
-
-        # Top N ordenado: maior valor no topo (plotly renderiza de baixo pra cima)
-        df_abc = (df_abc[df_abc["Valor_Total"] > 0]
-                  .sort_values("Valor_Total", ascending=False)
-                  .head(top_n)
-                  .sort_values("Valor_Total", ascending=True)
-                  .reset_index(drop=True))
-
-        if df_abc.empty:
-            fig = go.Figure()
-            fig.update_layout(plot_bgcolor=CARD, paper_bgcolor=CARD, height=300)
-            return fig
-
-        # Labels eixo Y
-        def _ylabel(row):
-            cod  = str(row.get("Codigo", "")).strip()
-            desc = str(row.get("Descricao_Peca", "")).strip()
-            if desc and desc not in ("", "nan", cod):
-                short = desc[:24] + "…" if len(desc) > 24 else desc
-                return f"{cod} · {short}"
-            return cod if cod else "—"
-
-        ylabels = [_ylabel(r) for _, r in df_abc.iterrows()]
-        curvas  = df_abc["Curva"].tolist()
-        valores = df_abc["Valor_Total"].tolist()
-        mx      = max(valores) if valores else 1
-
-        COR_MAP = {"A": ORG, "B": BLU2, "C": T3}
-        cores   = [COR_MAP.get(c, BLU2) for c in curvas]
-
+    if df is None or df.empty:
         fig = go.Figure()
-
-        # Trace principal: barras
-        fig.add_trace(go.Bar(
-            name="Valor Faturado",
-            orientation="h",
-            y=ylabels,
-            x=valores,
-            marker=dict(color=cores, line=dict(color="rgba(0,0,0,0)")),
-            text=[_brl(v) for v in valores],
-            textposition="outside",
-            cliponaxis=False,
-            textfont=dict(color=T1, size=13,
-                          family="Barlow Condensed, DM Sans, sans-serif"),
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "Valor: %{customdata[0]}<br>"
-                "Curva <b>%{customdata[1]}</b> · %{customdata[2]:.1f}% "
-                "(acum. %{customdata[3]:.1f}%)<extra></extra>"
-            ),
-            customdata=list(zip(
-                [_brl(v) for v in valores],
-                curvas,
-                df_abc["Pct"].tolist(),
-                df_abc["Pct_Acum"].tolist(),
-            )),
-            showlegend=False,
-        ))
-
-        # Traces fantasma para legenda A/B/C
-        badges = [("A", ORG, "Curva A ≤80%"), ("B", BLU2, "Curva B 80–95%"), ("C", T3, "Curva C >95%")]
-        for k, cor, lbl in badges:
-            if k in curvas:
-                fig.add_trace(go.Bar(
-                    name=lbl, x=[None], y=[None], orientation="h",
-                    marker=dict(color=cor),
-                    showlegend=True,
-                ))
-
-        n_items = len(df_abc)
-        altura  = max(500, 100 + n_items * 38)
-
-        fig.update_layout(
-            title=dict(
-                text=f"Curva ABC — Top {top_n} Peças Mais Vendidas",
-                font=dict(size=17, color=T1,
-                          family="Barlow Condensed, DM Sans, sans-serif"),
-                x=0.01, xanchor="left",
-            ),
-            plot_bgcolor=CARD,
-            paper_bgcolor=CARD,
-            font=dict(family="DM Sans, sans-serif", size=12, color=T2),
-            height=altura,
-            margin=dict(l=260, r=30, t=72, b=50),
-            bargap=0.25,
-            barmode="overlay",
-            hovermode="y unified",
-            hoverlabel=dict(bgcolor="#1A2A3A", font_size=12, bordercolor=ORG),
-            separators=",.",
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.01,
-                xanchor="left", x=0,
-                font=dict(size=12, color=T2),
-                bgcolor="rgba(0,0,0,0)",
-            ),
-            xaxis=dict(
-                range=[0, mx * 1.32],
-                showgrid=True,
-                gridcolor=GRD,
-                gridwidth=1,
-                zeroline=True,
-                zerolinecolor=GRD,
-                tickformat=",.0f",
-                tickprefix="R$ ",
-                tickfont=dict(color=T3, size=11),
-                linecolor="rgba(0,0,0,0)",
-            ),
-            yaxis=dict(
-                showgrid=False,
-                zeroline=False,
-                tickfont=dict(color=T2, size=12),
-                automargin=True,
-                categoryorder="array",
-                categoryarray=ylabels,
-                linecolor="rgba(0,0,0,0)",
-            ),
-        )
-
+        _layout_base(fig)
         return fig
 
-    except Exception as e:
-        st.error(f"Erro curva ABC: {e}")
-        return go.Figure()
+    col_rev = next(
+        (c for c in ["Revenda", "revenda", "Cliente", "cliente"] if c in df.columns),
+        df.columns[0],
+    )
+    col_val = next(
+        (c for c in ["Valor_Total", "valor_total", "Valor", "valor"] if c in df.columns),
+        df.columns[-1],
+    )
 
-def grafico_ranking_revendas_pecas(df: pd.DataFrame, top_n: int = 10):
-    try:
-        fat = (df[df["Status_Peca"] == "Faturado"]
-               if "Status_Peca" in df.columns else df)
-        if "Cliente_Revenda" not in fat.columns or fat.empty:
-            fig = go.Figure()
-            fig.add_annotation(text="Sem dados de revendas", x=0.5, y=0.5,
-                               showarrow=False, font=dict(color=T3, size=14))
-            return _base(fig, f"Top {top_n} Revendas — Consumo de Peças", 480)
-        rs = (fat.groupby("Cliente_Revenda")["Valor_Total"].sum()
-              .reset_index().sort_values("Valor_Total", ascending=True).tail(top_n))
-        # Garante que os nomes são string (evita eixo numérico)
-        rs["Cliente_Revenda"] = rs["Cliente_Revenda"].astype(str).str.strip()
+    df = df.copy()
+    df[col_val] = pd.to_numeric(df[col_val], errors="coerce").fillna(0)
+    df = (
+        df.groupby(col_rev, as_index=False)[col_val]
+        .sum()
+        .nlargest(top_n, col_val)
+        .sort_values(col_val, ascending=True)  # topo = maior
+    )
 
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            y=rs["Cliente_Revenda"], x=rs["Valor_Total"],
-            orientation="h",
-            marker=dict(
-                color=rs["Valor_Total"], colorscale=SCALE_MAIN,
-                showscale=False, line=dict(color="rgba(0,0,0,0)"),
-            ),
-            text=[_brl(v) for v in rs["Valor_Total"]],
-            textposition="outside", cliponaxis=False,
-            textfont=dict(color=T1, size=14,
-                          family="'Barlow Condensed','DM Sans',sans-serif"),
-            hovertemplate="<b>%{y}</b><br>%{customdata}<extra></extra>",
-            customdata=[_brl(v) for v in rs["Valor_Total"]],
-        ))
-        fig = _base(fig, f"Top {top_n} Revendas — Consumo de Peças", 480)
-        fig.update_xaxes(showgrid=True, gridcolor=GRD,
-                         tickformat=",.0f", tickprefix="R$ ")
-        # categoryorder garante ordenação correta sem autorange=reversed
-        fig.update_yaxes(showgrid=False,
-                         categoryorder="total ascending",
-                         tickfont=dict(size=12))
-        mx = float(rs["Valor_Total"].max()) if not rs.empty else 1
-        fig.update_layout(xaxis=dict(range=[0, mx * 1.28]))
-        return fig
-    except Exception as e:
-        st.error(f"Erro ranking revendas peças: {e}")
-        return go.Figure()
+    fig = px.bar(
+        df,
+        x=col_val,
+        y=col_rev,
+        orientation="h",
+        text=df[col_val].apply(_fmt_brl_compacto),
+        color_discrete_sequence=[_AZUL],
+    )
+
+    fig.update_traces(
+        textposition="outside",
+        textfont=dict(size=11, color="#EEF2F8"),
+        marker_color=_AZUL,
+        marker_line_width=0,
+        cliponaxis=False,
+    )
+
+    fig.update_layout(
+        paper_bgcolor=_PAPER,
+        plot_bgcolor=_BG,
+        font=dict(color=_TEXT, family="Inter, sans-serif", size=11),
+        margin=dict(l=10, r=80, t=20, b=10),
+        showlegend=False,
+        xaxis=dict(
+            rangemode="tozero",
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(color=_TEXT, size=10),
+            title=None,
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(color="#EEF2F8", size=10),
+            title=None,
+            automargin=True,
+        ),
+        bargap=0.25,
+        height=max(300, len(df) * 28 + 60),
+    )
+
+    return fig
 
 
-def grafico_evolucao_pecas(df: pd.DataFrame):
-    try:
-        if "Data_Venda" not in df.columns:
-            return None
-        dt = df.copy()
-        dt["Data_Venda"] = pd.to_datetime(dt["Data_Venda"], errors="coerce")
-        dt = dt.dropna(subset=["Data_Venda"])
-        if dt.empty:
-            return None
-        if dt["Data_Venda"].dt.tz is not None:
-            dt["Data_Venda"] = dt["Data_Venda"].dt.tz_localize(None)
-        dt["Mes"] = dt["Data_Venda"].dt.to_period("M").dt.start_time
+# ══════════════════════════════════════════════════════════════
+# Gráfico genérico de linha (para lead time / evolução)
+# ══════════════════════════════════════════════════════════════
 
-        fat  = (dt[dt["Status_Peca"] == "Faturado"]
-                .groupby("Mes")["Valor_Total"].sum().reset_index())
-        orca = (dt[dt["Status_Peca"] == "Orçamento"]
-                .groupby("Mes")["Valor_Total"].sum().reset_index())
-
-        fig = go.Figure()
-        if not fat.empty:
-            fig.add_trace(go.Scatter(
-                x=fat["Mes"], y=fat["Valor_Total"],
-                name="Faturado", mode="lines+markers",
-                line=dict(color=GRN, width=2.5, shape="spline"),
-                marker=dict(size=6, color=GRN),
-                fill="tozeroy", fillcolor="rgba(61,153,112,.10)",
-                hovertemplate="Faturado %{x|%b/%Y}<br>%{customdata}<extra></extra>",
-                customdata=[_brl(v) for v in fat["Valor_Total"]],
-            ))
-        if not orca.empty:
-            fig.add_trace(go.Scatter(
-                x=orca["Mes"], y=orca["Valor_Total"],
-                name="Orçamento", mode="lines+markers",
-                line=dict(color=YEL, width=2, dash="dot"),
-                marker=dict(size=6, color=YEL),
-                hovertemplate="Orçamento %{x|%b/%Y}<br>%{customdata}<extra></extra>",
-                customdata=[_brl(v) for v in orca["Valor_Total"]],
-            ))
-        fig = _base(fig, "Evolução Mensal — Peças Faturadas vs. Orçadas", 420)
-        fig.update_xaxes(tickformat="%b/%y")
-        fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ")
-        return fig
-    except Exception as e:
-        st.error(f"Erro evolução peças: {e}")
-        return None
+def grafico_linha_serie(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    title: str = "",
+    color: str = _LARANJA,
+) -> go.Figure:
+    """Linha temporal simples com tema dark."""
+    fig = px.line(df, x=x, y=y, title=title, color_discrete_sequence=[color])
+    fig.update_traces(line_width=2)
+    fig.update_layout(
+        paper_bgcolor=_PAPER,
+        plot_bgcolor=_BG,
+        font=dict(color=_TEXT, size=11),
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=False, zeroline=False, tickfont=dict(color=_TEXT)),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor=_GRID,
+            zeroline=False,
+            tickfont=dict(color=_TEXT),
+            rangemode="tozero",
+        ),
+    )
+    return fig

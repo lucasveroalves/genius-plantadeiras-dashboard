@@ -288,7 +288,8 @@ def render_formulario_revendas():
                 st.toast("✅ Revenda cadastrada!", icon="✅")
                 st.rerun()
 
-    lista = ler_revendas_cadastro()
+    df_rev = ler_revendas_cadastro()
+    lista = df_rev.to_dict("records") if not df_rev.empty else []
     if lista:
         st.divider()
         st.subheader(f"📋 Revendas Cadastradas ({len(lista)})")

@@ -1,0 +1,27 @@
+# .streamlit/config.toml
+# Genius Implementos Agrícolas — Tema Dark Premium v15
+
+[theme]
+base                   = "dark"
+primaryColor           = "#E67E22"
+backgroundColor        = "#12171D"
+secondaryBackgroundColor = "#1E262E"
+textColor              = "#EEF2F8"
+font                   = "sans serif"
+
+[browser]
+# Desabilita a coleta de estatísticas de uso
+gatherUsageStats = false
+
+[server]
+# Impede abertura automática do browser em produção
+headless         = true
+# CORS permissivo para deploy em containers/proxy reverso
+enableCORS       = false
+enableXsrfProtection = true
+
+[client]
+# [WHITE-1] Minimiza a toolbar nativa do Streamlit
+toolbarMode      = "minimal"
+# Desabilita o botão de deploy na toolbar
+showErrorDetails = false
