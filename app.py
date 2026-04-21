@@ -239,6 +239,11 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     # ── Orçamentos ─────────────────────────────────────────────
     df_orc = ler_orcamentos()
+    orc_faturados = 0.0
+    orc_aguardando = 0.0
+    if not df_orc.empty and "Status_Orc" in df_orc.columns:
+        orc_faturados  = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"]=="Faturado",  "Valor_Total"], errors="coerce").fillna(0).sum()
+        orc_aguardando = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"]=="Aguardando","Valor_Total"], errors="coerce").fillna(0).sum()
     pecas_em_orc = 0.0
     if not df_orc.empty and "Status_Orc" in df_orc.columns:
         mask = df_orc["Status_Orc"].isin(["Aguardando"])
@@ -275,14 +280,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         c1, c2, c3, c4, c5 = st.columns(5)
         total_com_orc = kpis["total_faturado"] + orc_faturados
         with c1: _card("💰 Total Faturado",  _brl(total_com_orc))
-        # Orçamentos Aguardando = pipeline pendente
-        orc_aguardando = 0.0
-        orc_faturados  = 0.0
-        if not df_orc.empty and "Status_Orc" in df_orc.columns:
-            mask_ag = df_orc["Status_Orc"] == "Aguardando"
-            mask_fat = df_orc["Status_Orc"] == "Faturado"
-            orc_aguardando = pd.to_numeric(df_orc.loc[mask_ag, "Valor_Total"], errors="coerce").fillna(0).sum()
-            orc_faturados  = pd.to_numeric(df_orc.loc[mask_fat, "Valor_Total"], errors="coerce").fillna(0).sum()
         with c2: _card("⏳ Orc. Aguardando", _brl(orc_aguardando))
         with c3: _card("📦 Volume de Itens",  f"{int(kpis['volume_itens']):,}".replace(",", "."))
         with c4: _card("🎟️ Ticket Médio",     _brl(kpis["ticket_medio"]))
