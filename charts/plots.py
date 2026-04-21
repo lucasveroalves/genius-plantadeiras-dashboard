@@ -58,18 +58,8 @@ def _layout_base(fig: go.Figure, title: str = "") -> go.Figure:
 
 def grafico_curva_abc(df: pd.DataFrame) -> go.Figure:
     """
-    Gráfico de barras horizontais para a Curva ABC de peças.
-
-    Parâmetros esperados no df:
-        - 'Codigo_Peca' ou 'Descricao'  → label do eixo Y
-        - 'Valor_Total' ou 'Quantidade' → magnitude das barras (eixo X)
-        - 'Classe' (opcional)           → cor A/B/C
-
-    Regras de exibição:
-        - Ordena descrescente → maior barra no TOPO
-        - Eixo X começa ESTRITAMENTE do zero (rangemode="tozero")
-        - Rótulos compactos no final de cada barra
-        - Sem grid de fundo
+    Gráfico de PIZZA (pie) para a Curva ABC de peças.
+    Agrupa por classe A/B/C e mostra % do faturamento total.
     """
     if df is None or df.empty:
         fig = go.Figure()
@@ -81,17 +71,12 @@ def grafico_curva_abc(df: pd.DataFrame) -> go.Figure:
         )
         return fig
 
-    # ── Decide coluna de label e de valor ─────────────────────
-    col_label = next(
-        (c for c in ["Descricao", "Codigo_Peca", "descricao", "codigo_peca"] if c in df.columns),
-        df.columns[0],
-    )
     col_valor = next(
         (c for c in ["Valor_Total", "valor_total", "Quantidade", "quantidade"] if c in df.columns),
         df.columns[-1],
     )
     col_classe = next(
-        (c for c in ["Classe", "classe", "Curva", "curva"] if c in df.columns),
+        (c for c in ["Curva", "curva", "Classe", "classe"] if c in df.columns),
         None,
     )
 
@@ -104,74 +89,65 @@ def grafico_curva_abc(df: pd.DataFrame) -> go.Figure:
         _layout_base(fig)
         return fig
 
-    # Ordena crescente para que maior fique no TOPO no px (eixo y invertido)
-    df = df.sort_values(col_valor, ascending=True).tail(25)
-
-    # ── Mapa de cores por classe A/B/C ─────────────────────────
-    color_map = {"A": _LARANJA, "B": _VERDE, "C": _AZUL}
+    # Agrupa por classe
     if col_classe and col_classe in df.columns:
-        color_col = col_classe
+        grp = df.groupby(col_classe)[col_valor].sum().reset_index()
+        labels = grp[col_classe].tolist()
+        values = grp[col_valor].tolist()
     else:
-        # Atribui classe pelo percentil se não existir
-        df["_classe_calc"] = pd.cut(
-            df[col_valor].rank(pct=True),
-            bins=[0, 0.2, 0.5, 1.0],
-            labels=["C", "B", "A"],
-        ).astype(str)
-        color_col = "_classe_calc"
-        color_map = {"A": _LARANJA, "B": _VERDE, "C": _AZUL}
+        # Sem classe — agrupa pelo top 5 + Outros
+        df_sorted = df.sort_values(col_valor, ascending=False)
+        col_label = next(
+            (c for c in ["Descricao_Peca", "Codigo_Peca", "Codigo"] if c in df.columns),
+            df.columns[0],
+        )
+        top5 = df_sorted.head(5)
+        outros_val = df_sorted.iloc[5:][col_valor].sum()
+        labels = top5[col_label].tolist()
+        values = top5[col_valor].tolist()
+        if outros_val > 0:
+            labels.append("Outros")
+            values.append(outros_val)
 
-    # ── Plotly Express: barras horizontais ────────────────────
-    fig = px.bar(
-        df,
-        x=col_valor,
-        y=col_label,
-        orientation="h",
-        color=color_col,
-        color_discrete_map=color_map,
-        text=df[col_valor].apply(_fmt_brl_compacto),
-    )
+    color_map = {
+        "A": _LARANJA, "B": _VERDE, "C": _AZUL,
+        "Outros": "#4A5568",
+    }
+    colors = [color_map.get(str(l), _AZUL) for l in labels]
 
-    # ── Estilização das barras ─────────────────────────────────
-    fig.update_traces(
-        textposition="outside",
-        textfont=dict(size=11, color="#EEF2F8"),
-        marker_line_width=0,
-        cliponaxis=False,
-    )
+    # Formata texto das fatias
+    total = sum(values)
+    text_labels = [
+        f"{l}<br>{_fmt_brl_compacto(v)}<br>({v/total*100:.1f}%)"
+        for l, v in zip(labels, values)
+    ]
 
-    # ── Layout ─────────────────────────────────────────────────
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        text=text_labels,
+        textinfo="label+percent",
+        hovertemplate="<b>%{label}</b><br>%{value:,.0f}<br>%{percent}<extra></extra>",
+        marker=dict(colors=colors, line=dict(color=_PAPER, width=2)),
+        hole=0.35,
+    ))
+
     fig.update_layout(
         paper_bgcolor=_PAPER,
         plot_bgcolor=_BG,
-        font=dict(color=_TEXT, family="Inter, sans-serif", size=11),
-        margin=dict(l=10, r=80, t=20, b=10),
-        showlegend=bool(col_classe),
+        font=dict(color=_TEXT, family="Inter, sans-serif", size=12),
+        margin=dict(l=10, r=10, t=30, b=10),
+        showlegend=True,
         legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="left", x=0,
-            font=dict(size=10, color=_TEXT),
+            orientation="v",
+            font=dict(size=11, color=_TEXT),
+            bgcolor="rgba(0,0,0,0)",
         ),
-        # ── [FIX-ABC] Eixo X SEMPRE começa do zero ────────────
-        xaxis=dict(
-            rangemode="tozero",        # NUNCA corta abaixo de 0
-            showgrid=False,            # Remove grid vertical
-            zeroline=False,
-            tickfont=dict(color=_TEXT, size=10),
-            title=None,
-        ),
-        yaxis=dict(
-            showgrid=False,            # Remove grid horizontal
-            zeroline=False,
-            tickfont=dict(color="#EEF2F8", size=10),
-            title=None,
-            automargin=True,
-        ),
-        bargap=0.25,
-        height=max(300, len(df) * 28 + 60),
+        height=380,
     )
 
     return fig
+
 
 
 # ══════════════════════════════════════════════════════════════

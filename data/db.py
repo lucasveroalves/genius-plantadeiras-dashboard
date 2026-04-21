@@ -369,7 +369,14 @@ def importar_pecas_senior_para_supabase(
             df[_c] = df[_c].where(pd.notna(df[_c]), other=None)
 
         # Converte para lista de dicionários
-        registros: list[dict] = df.to_dict("records")
+        # Limpa float NaN residuais após to_dict (JSON não aceita float('nan'))
+        import math as _math
+        def _limpar_registro(rec: dict) -> dict:
+            return {
+                k: (None if (v is not None and isinstance(v, float) and _math.isnan(v)) else v)
+                for k, v in rec.items()
+            }
+        registros: list[dict] = [_limpar_registro(r) for r in df.to_dict("records")]
         total     = len(registros)
         n_batches = math.ceil(total / batch_size)
         n_ok      = 0
