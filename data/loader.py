@@ -235,10 +235,60 @@ def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str) -> tuple
         return criar_mock_pecas(), True
 
 
+def _ler_pecas_supabase() -> pd.DataFrame:
+    """
+    Lê os dados de peças diretamente da tabela pecas_senior no Supabase.
+    Usa paginação para garantir que todas as linhas sejam lidas (>1000).
+    """
+    try:
+        from data.db import _sb
+        client = _sb()
+        todos = []
+        page_size = 1000
+        offset = 0
+        while True:
+            resp = (
+                client.table("pecas_senior")
+                .select("*")
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            batch = resp.data or []
+            todos.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        if not todos:
+            return pd.DataFrame()
+        df = pd.DataFrame(todos)
+        # Renomeia colunas para padrão interno se necessário
+        rename = {
+            "Emissao": "Data_Venda",
+            "Produto": "Codigo",
+            "Qtde_Fat_": "Quantidade",
+            "Vlr_Liq_": "Valor_Total",
+            "Preco_Un_": "Valor_Unitario",
+        }
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+        if "Data_Venda" in df.columns:
+            df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce", dayfirst=True)
+        if "Valor_Total" in df.columns:
+            df["Valor_Total"] = pd.to_numeric(df["Valor_Total"], errors="coerce").fillna(0)
+        if "Quantidade" in df.columns:
+            df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
+        return df
+    except Exception as e:
+        st.warning(f"⚠️ Não foi possível ler do Supabase: {e}")
+        return pd.DataFrame()
+
+
 def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
     """
-    [FIX-ACUMULO] Dados da planilha são base histórica.
-    Lançamentos manuais futuros SOMAM por cima — nunca sobrescrevem.
+    Hierarquia de fontes:
+    1. Upload novo → processa + importa para Supabase + salva em session_state
+    2. session_state (mesma sessão, já processado)
+    3. Supabase (pecas_senior) — fonte principal em produção
+    4. Mock (fallback quando banco vazio)
     """
     if _uploaded_file is not None:
         _uploaded_file.seek(0)
@@ -251,9 +301,19 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
         return df, is_mock
 
     if "_pecas_df" in st.session_state:
-        nome = st.session_state.get("_pecas_nome", "planilha carregada")
-        st.sidebar.caption(f"📂 Peças: {nome} (cache)")
+        nome = st.session_state.get("_pecas_nome", "Supabase")
+        st.sidebar.caption(f"📂 Peças: {nome}")
         return st.session_state["_pecas_df"], False
+
+    # ── Lê direto do Supabase ──────────────────────────────────
+    with st.spinner("📡 Carregando peças do banco..."):
+        df_sb = _ler_pecas_supabase()
+
+    if not df_sb.empty:
+        st.session_state["_pecas_df"]   = df_sb
+        st.session_state["_pecas_nome"] = "Supabase"
+        st.sidebar.caption(f"📂 Peças: {len(df_sb):,} registros do Supabase")
+        return df_sb, False
 
     return criar_mock_pecas(), True
 
