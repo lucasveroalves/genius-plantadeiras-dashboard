@@ -365,7 +365,7 @@ def importar_pecas_senior_para_supabase(
         # Substitui NaN/NaT/inf/-inf por None (JSON null)
         import numpy as np
         df = df.replace([np.inf, -np.inf], None)
-        df = df.where(pd.notna(df), other=None)
+        df = df.astype(object).where(pd.notna(df), other=None)
 
         # Converte para lista de dicionários
         registros: list[dict] = df.to_dict("records")
