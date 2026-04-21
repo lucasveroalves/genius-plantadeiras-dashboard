@@ -308,13 +308,15 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         [df_para_calculos, df_orc_para_abc], ignore_index=True
     ) if not df_orc_para_abc.empty else df_para_calculos
     df_abc = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=20)
+    # df_completo para pie chart calcular distribuição A/B/C real
+    df_abc_completo = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=99999)
 
     if perfil == "comercial":
         col_abc, col_rev = st.columns(2)
         with col_abc:
             st.subheader("📊 Curva ABC – Peças Mais Vendidas")
             if not df_abc.empty:
-                st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
+                st.plotly_chart(grafico_curva_abc(df_abc_completo), use_container_width=True)
             else:
                 st.info("Sem dados para Curva ABC.")
         with col_rev:
@@ -339,7 +341,7 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     else:
         st.subheader("📊 Curva ABC – Previsão de Estoque Mínimo de Peças")
         if not df_abc.empty:
-            st.plotly_chart(grafico_curva_abc(df_abc), use_container_width=True)
+            st.plotly_chart(grafico_curva_abc(df_abc_completo), use_container_width=True)
         else:
             st.info("Sem dados para Curva ABC.")
 
