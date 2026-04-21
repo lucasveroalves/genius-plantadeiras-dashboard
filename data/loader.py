@@ -272,15 +272,15 @@ def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
         faturamento = volume = 0.0
         n = qtd_skus = 0
     else:
-        fat = df[df["Status_Peca"] == "Faturado"].copy() if "Status_Peca" in df.columns else df.copy()
-        if fat.empty:
-            fat = df.copy()
-        faturamento = pd.to_numeric(fat.get("Valor_Total", pd.Series(dtype=float)),
-                                    errors="coerce").fillna(0).sum()
-        volume      = pd.to_numeric(fat.get("Quantidade", pd.Series(dtype=float)),
-                                    errors="coerce").fillna(0).sum()
+        fat = df.copy()
+        # Mapeia colunas do Senior ERP para nomes padronizados
+        col_valor = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq","Vlr.Liq."] if c in fat.columns), None)
+        col_qtd   = next((c for c in ["Quantidade","Qtde_Fat_","qtde_fat","Qtde.Fat."] if c in fat.columns), None)
+        col_cod   = next((c for c in ["Codigo","Produto","produto","codigo"] if c in fat.columns), None)
+        faturamento = pd.to_numeric(fat[col_valor], errors="coerce").fillna(0).sum() if col_valor else 0.0
+        volume      = pd.to_numeric(fat[col_qtd],   errors="coerce").fillna(0).sum() if col_qtd   else 0.0
         n           = len(fat)
-        qtd_skus    = fat["Codigo"].nunique() if "Codigo" in fat.columns else 0
+        qtd_skus    = fat[col_cod].nunique() if col_cod else 0
 
         if data_inicio is None and not fat.empty and "Data_Venda" in fat.columns:
             try:
@@ -340,14 +340,24 @@ def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataF
     faturamento — nao apenas o recorte exibido.
     """
     _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Pct_Acum", "Curva"]
-    if df is None or df.empty or "Codigo" not in df.columns:
+    if df is None or df.empty:
         return pd.DataFrame(columns=_cols)
 
-    agg = {"Valor_Total": ("Valor_Total", "sum")}
-    agg["Descricao_Peca"] = ("Descricao_Peca", "first") if "Descricao_Peca" in df.columns \
-                             else ("Codigo", "first")
+    # Mapeia colunas do Senior ERP
+    col_cod   = next((c for c in ["Codigo","Produto","produto","codigo"] if c in df.columns), None)
+    col_valor = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq"] if c in df.columns), None)
+    col_desc  = next((c for c in ["Descricao_Peca","Descricao","descricao"] if c in df.columns), col_cod)
 
-    grp = df.groupby("Codigo").agg(**agg).reset_index()
+    if not col_cod or not col_valor:
+        return pd.DataFrame(columns=_cols)
+
+    df = df.copy()
+    df["_cod"]   = df[col_cod].astype(str)
+    df["_valor"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
+    df["_desc"]  = df[col_desc].astype(str) if col_desc else df["_cod"]
+
+    agg = {"Valor_Total": ("_valor", "sum"), "Descricao_Peca": ("_desc", "first")}
+    grp = df.groupby("_cod").agg(**agg).reset_index().rename(columns={"_cod": "Codigo"})
     grp = grp[grp["Valor_Total"] > 0].sort_values("Valor_Total", ascending=False).reset_index(drop=True)
     if grp.empty:
         return pd.DataFrame(columns=_cols)
@@ -365,9 +375,18 @@ def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataF
 
 
 def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:
-    """Top 10 revendas por faturamento — usa o NOME do cliente (col após 'Cliente' no Senior)."""
-    if df is None or df.empty or "Cliente_Revenda" not in df.columns:
+    """Top 10 revendas por faturamento — aceita múltiplos nomes de coluna."""
+    if df is None or df.empty:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
+    col_cli = next((c for c in ["Cliente_Revenda","Cliente","cliente","Revenda"] if c in df.columns), None)
+    col_val = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq"] if c in df.columns), None)
+    if not col_cli or not col_val:
+        return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
+    df = df.copy()
+    df["Cliente_Revenda"] = df[col_cli].astype(str)
+    df["Valor_Total"] = pd.to_numeric(df[col_val], errors="coerce").fillna(0)
+    if False:  # placeholder para manter estrutura
+        pass
 
     top = df.groupby("Cliente_Revenda")["Valor_Total"].sum().reset_index()
     top = top[

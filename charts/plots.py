@@ -89,25 +89,26 @@ def grafico_curva_abc(df: pd.DataFrame) -> go.Figure:
         _layout_base(fig)
         return fig
 
-    # Agrupa por classe
+    # Calcula curva ABC completa e agrupa por CLASSE
+    df[col_valor] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
+    total_geral = df[col_valor].sum()
+    
     if col_classe and col_classe in df.columns:
+        # Já tem coluna de classe — agrupa direto
         grp = df.groupby(col_classe)[col_valor].sum().reset_index()
         labels = grp[col_classe].tolist()
         values = grp[col_valor].tolist()
     else:
-        # Sem classe — agrupa pelo top 5 + Outros
-        df_sorted = df.sort_values(col_valor, ascending=False)
-        col_label = next(
-            (c for c in ["Descricao_Peca", "Codigo_Peca", "Codigo"] if c in df.columns),
-            df.columns[0],
+        # Calcula ABC pelo acumulado e agrupa por classe
+        df_sorted = df.sort_values(col_valor, ascending=False).copy()
+        df_sorted["pct_acum"] = df_sorted[col_valor].cumsum() / total_geral * 100
+        df_sorted["Curva"] = df_sorted["pct_acum"].apply(
+            lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C")
         )
-        top5 = df_sorted.head(5)
-        outros_val = df_sorted.iloc[5:][col_valor].sum()
-        labels = top5[col_label].tolist()
-        values = top5[col_valor].tolist()
-        if outros_val > 0:
-            labels.append("Outros")
-            values.append(outros_val)
+        grp = df_sorted.groupby("Curva")[col_valor].sum()
+        # Garante ordem A, B, C
+        labels = [c for c in ["A", "B", "C"] if c in grp.index]
+        values = [grp[c] for c in labels]
 
     color_map = {
         "A": _LARANJA, "B": _VERDE, "C": _AZUL,

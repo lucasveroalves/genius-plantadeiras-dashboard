@@ -291,8 +291,23 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         with c2: _card("🏷️ SKUs Ativos",     str(kpis["qtd_skus"]))
         st.divider()
 
-    # ── Curva ABC ──────────────────────────────────────────────
-    df_abc = calcular_curva_abc_por_codigo(df_para_calculos, top_n=20)
+    # ── Curva ABC — inclui orçamentos manuais Faturados ──────
+    # Monta df extra dos orçamentos para enriquecer a curva e o top10
+    df_orc_para_abc = pd.DataFrame()
+    if not df_orc.empty and "Status_Orc" in df_orc.columns:
+        df_fat_orc = df_orc[df_orc["Status_Orc"] == "Faturado"].copy()
+        if not df_fat_orc.empty:
+            # Mapeia colunas do orçamento para o formato da planilha
+            df_orc_para_abc = pd.DataFrame({
+                "Codigo":         df_fat_orc.get("Nr_Pedido", pd.Series(dtype=str)),
+                "Descricao_Peca": df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
+                "Valor_Total":    pd.to_numeric(df_fat_orc.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0),
+                "Cliente_Revenda":df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
+            })
+    df_para_calculos_enriquecido = pd.concat(
+        [df_para_calculos, df_orc_para_abc], ignore_index=True
+    ) if not df_orc_para_abc.empty else df_para_calculos
+    df_abc = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=20)
 
     if perfil == "comercial":
         col_abc, col_rev = st.columns(2)
