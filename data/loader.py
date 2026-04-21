@@ -21,7 +21,7 @@ from __future__ import annotations
 import io, unicodedata, hashlib
 import pandas as pd
 import streamlit as st
-# cache de peças via session_state (salvar_cache_pecas/ler_cache_pecas removidos)
+# cache de peças via session_state
 
 
 # ── Utilitários ───────────────────────────────────────────────
@@ -252,7 +252,7 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
 
     if "_pecas_df" in st.session_state:
         nome = st.session_state.get("_pecas_nome", "planilha carregada")
-        st.sidebar.caption(f"📂 Peças: {nome}")
+        st.sidebar.caption(f"📂 Peças: {nome} (cache)")
         return st.session_state["_pecas_df"], False
 
     return criar_mock_pecas(), True

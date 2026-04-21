@@ -214,28 +214,18 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     # ── [FIX-DATE] Filtro de Período Dinâmico ─────────────────
     # Não trava nas datas do df: usuário pode escolher livremente.
     hoje = date.today()
-    col_f1, col_f2 = st.columns([4, 1])
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
+    default_ini = hoje - timedelta(days=365)
+    default_fim = hoje
     with col_f1:
-        # Default: últimos 365 dias → hoje
-        default_ini = hoje - timedelta(days=365)
-        default_fim = hoje
-        intervalo = st.date_input(
-            "Selecione o período",
-            value=(default_ini, default_fim),
-            # SEM min_value / max_value — completamente livre
-            format="DD/MM/YYYY",
-            key="peca_periodo",
-        )
+        d0 = st.date_input("De", value=default_ini, format="DD/MM/YYYY", key="peca_d0")
     with col_f2:
+        d1 = st.date_input("Até", value=default_fim, format="DD/MM/YYYY", key="peca_d1")
+    with col_f3:
         st.write("")
         st.write("")
         if st.button("🔄 Aplicar", key="peca_btn_filtro"):
             st.rerun()
-
-    # Aplica filtro de período
-    d0, d1 = default_ini, default_fim
-    if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
-        d0, d1 = intervalo
 
     if not df_pecas_arg.empty and "Data_Venda" in df_pecas_arg.columns:
         dv = df_pecas_arg["Data_Venda"]
@@ -258,7 +248,8 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     # ── KPIs ───────────────────────────────────────────────────
     if perfil == "comercial":
-        kpis = calcular_kpis_pecas(df_filtrado, df_orc, data_inicio=d0, data_fim=d1)
+        # df_orc sem filtro de período — orçamentos lançados hoje sempre somam
+        kpis = calcular_kpis_pecas(df_filtrado, df_orc)
     else:
         kpis = calcular_kpis_pecas(df_para_calculos)
 
