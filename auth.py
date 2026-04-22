@@ -23,6 +23,7 @@ TODAS_ABAS = [
     "📦 Estoque de Máquinas",
     "📄 NF em Demonstração",
     "🔧 Peças",
+    "🗺️ Territórios",
 ]
 ABAS_COMERCIAL = TODAS_ABAS
 ABAS_PCP       = ["⚙️ PCP", "🔧 Peças"]
@@ -257,8 +258,10 @@ def render_painel_admin():
                     novo_perfil = st.selectbox("Perfil", ["comercial","pcp"],
                                                index=0 if perfil_u=="comercial" else 1,
                                                key=f"pf_{login}")
+                    # Filtra abas_u para só incluir valores que existem em TODAS_ABAS
+                    abas_u_validas = [a for a in (abas_u or []) if a in TODAS_ABAS]
                     novas_abas  = st.multiselect("Abas com acesso", TODAS_ABAS,
-                                                  default=abas_u, key=f"ab_{login}")
+                                                  default=abas_u_validas, key=f"ab_{login}")
                     novo_admin  = st.checkbox("Administrador", value=admin_u, key=f"adm_{login}")
                     salvar_perm = st.form_submit_button("💾 Salvar Permissões", type="primary")
                 if salvar_perm:

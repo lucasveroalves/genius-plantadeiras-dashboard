@@ -214,11 +214,27 @@ def _construir_mapa(df_terr: pd.DataFrame) -> go.Figure:
     )
 
     if df_terr.empty:
-        # Mapa vazio com instrução
+        # Mesmo sem dados mostra o mapa base com países destacados
+        # Destaca Brasil, Paraguai e Bolívia
+        for pais, lat, lon, cor in [
+            ("🇧🇷 Brasil", -15.0, -53.0, "#E67E22"),
+            ("🇵🇾 Paraguai", -23.4, -58.4, "#3D9970"),
+            ("🇧🇴 Bolívia", -16.5, -64.5, "#2A5A8A"),
+        ]:
+            fig.add_trace(go.Scattergeo(
+                lat=[lat], lon=[lon],
+                mode="markers+text",
+                marker=dict(size=12, color=cor, opacity=0.6),
+                text=[pais],
+                textposition="top center",
+                textfont=dict(size=11, color=cor),
+                name=pais,
+                hovertemplate=f"{pais}<extra></extra>",
+            ))
         fig.add_annotation(
-            text="Cadastre revendas e cidades para visualizar os territórios",
-            x=0.5, y=0.5, xref="paper", yref="paper",
-            font=dict(size=14, color="#6A7A8A"),
+            text="Cadastre revendas na aba abaixo para visualizar os territórios",
+            x=0.5, y=0.02, xref="paper", yref="paper",
+            font=dict(size=12, color="#6A7A8A"),
             showarrow=False,
         )
         return fig
