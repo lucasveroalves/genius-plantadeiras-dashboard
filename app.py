@@ -34,8 +34,9 @@ from components.forms        import (
     render_formulario_revendas,
 )
 from components.nf_demo      import render_aba_nf_demo
-from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase, importar_catalogo_pecas, ler_catalogo_pecas
+from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase, importar_catalogo_pecas, ler_catalogo_pecas, ler_lancamentos_pecas
 from components.tab_leadtime import render_tab_leadtime
+from components.tab_territorios import render_aba_territorios
 from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas, grafico_top_produtos
 
 # ══════════════════════════════════════════════════════════════
@@ -325,20 +326,36 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     # ── Curva ABC — inclui orçamentos manuais Faturados ──────
     # Monta df extra dos orçamentos para enriquecer a curva e o top10
+    # Orçamentos faturados para ABC
     df_orc_para_abc = pd.DataFrame()
     if not df_orc.empty and "Status_Orc" in df_orc.columns:
         df_fat_orc = df_orc[df_orc["Status_Orc"] == "Faturado"].copy()
         if not df_fat_orc.empty:
-            # Mapeia colunas do orçamento para o formato da planilha
             df_orc_para_abc = pd.DataFrame({
-                "Codigo":         df_fat_orc.get("Nr_Pedido", pd.Series(dtype=str)),
-                "Descricao_Peca": df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
-                "Valor_Total":    pd.to_numeric(df_fat_orc.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0),
-                "Cliente_Revenda":df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
+                "Codigo":          df_fat_orc.get("Nr_Pedido", pd.Series(dtype=str)),
+                "Descricao_Peca":  df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
+                "Valor_Total":     pd.to_numeric(df_fat_orc.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0),
+                "Cliente_Revenda": df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
             })
+
+    # Lançamentos manuais de peças (itens individuais com código)
+    df_lanc = ler_lancamentos_pecas()
+    df_lanc_para_abc = pd.DataFrame()
+    if not df_lanc.empty:
+        df_lanc_fat = df_lanc[df_lanc.get("Status_Lanc", pd.Series(dtype=str)) == "Faturado"] if "Status_Lanc" in df_lanc.columns else df_lanc
+        if not df_lanc_fat.empty:
+            df_lanc_para_abc = pd.DataFrame({
+                "Codigo":          df_lanc_fat.get("Codigo", pd.Series(dtype=str)).astype(str),
+                "Descricao_Peca":  df_lanc_fat.get("Descricao", pd.Series(dtype=str)),
+                "Valor_Total":     pd.to_numeric(df_lanc_fat.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0),
+                "Cliente_Revenda": df_lanc_fat.get("Cliente_Revenda", pd.Series(dtype=str)),
+                "Quantidade":      pd.to_numeric(df_lanc_fat.get("Quantidade", pd.Series(dtype=float)), errors="coerce").fillna(0),
+            })
+
     df_para_calculos_enriquecido = pd.concat(
-        [df_para_calculos, df_orc_para_abc], ignore_index=True
-    ) if not df_orc_para_abc.empty else df_para_calculos
+        [df_para_calculos, df_orc_para_abc, df_lanc_para_abc],
+        ignore_index=True
+    )
     df_abc = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=20)
     # df_completo para pie chart calcular distribuição A/B/C real
     df_abc_completo = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=99999)
@@ -347,10 +364,14 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         col_abc, col_rev = st.columns(2)
         with col_abc:
             st.subheader("📊 Curva ABC – Peças Mais Vendidas")
-            if not df_abc.empty:
+            if not df_abc_completo.empty:
                 st.plotly_chart(grafico_curva_abc(df_abc_completo), use_container_width=True)
-                st.markdown("##### 🏷️ Top 15 Produtos por Faturamento")
-                st.plotly_chart(grafico_top_produtos(df_abc, top_n=15), use_container_width=True)
+                # Top 15 por cada classe A, B, C
+                for _classe, _emoji, _cor in [("A","🟠","#E67E22"),("B","🟢","#3D9970"),("C","🔵","#2A5A8A")]:
+                    _df_classe = df_abc_completo[df_abc_completo["Curva"] == _classe] if "Curva" in df_abc_completo.columns else pd.DataFrame()
+                    if not _df_classe.empty:
+                        st.markdown(f"##### {_emoji} Top 15 Produtos — Classe {_classe}")
+                        st.plotly_chart(grafico_top_produtos(_df_classe, top_n=15), use_container_width=True)
             else:
                 st.info("Sem dados para Curva ABC.")
         with col_rev:
@@ -545,6 +566,7 @@ MAPA = {
     "📦 Estoque de Máquinas":  lambda: render_aba_estoque(),
     "📄 NF em Demonstração":   lambda: render_aba_nf_demo(),
     "🔧 Peças":                lambda df=df_pecas, mock=is_mock_pecas: _render_aba_pecas(df, mock),
+    "🗺️ Territórios":          lambda: render_aba_territorios(),
 }
 
 permitidas = abas_permitidas()

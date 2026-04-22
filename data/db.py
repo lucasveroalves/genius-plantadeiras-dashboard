@@ -619,3 +619,120 @@ def importar_catalogo_pecas(df: pd.DataFrame) -> tuple[int, str]:
         return n_ok, "OK"
     except Exception as e:
         return 0, str(e)
+
+
+# ══════════════════════════════════════════════════════════════
+# Lançamentos de Peças Manuais (tabela: lancamentos_pecas)
+# Alimenta a curva ABC com pedidos manuais
+# ══════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=5)
+def ler_lancamentos_pecas() -> pd.DataFrame:
+    """Lê todos os lançamentos manuais de peças."""
+    try:
+        todos = []
+        page_size = 1000
+        offset = 0
+        while True:
+            resp = (
+                _sb().table("lancamentos_pecas")
+                .select("*")
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            batch = resp.data or []
+            todos.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return pd.DataFrame(todos) if todos else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def adicionar_lancamento_peca(registro: dict) -> bool:
+    try:
+        _sb().table("lancamentos_pecas").insert(registro).execute()
+        ler_lancamentos_pecas.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao adicionar lançamento: {e}")
+        return False
+
+
+def excluir_lancamento_peca(row_id: int) -> bool:
+    try:
+        _sb().table("lancamentos_pecas").delete().eq("id", row_id).execute()
+        ler_lancamentos_pecas.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao excluir lançamento: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════
+# Territórios de Revendas/Representantes (tabela: territorios)
+# ══════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=30)
+def ler_territorios() -> pd.DataFrame:
+    try:
+        data = _safe_response(_sb().table("territorios").select("*").order("id").execute())
+        return pd.DataFrame(data) if data else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+def adicionar_territorio(registro: dict) -> bool:
+    try:
+        _sb().table("territorios").insert(registro).execute()
+        ler_territorios.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao adicionar território: {e}")
+        return False
+
+def excluir_territorio(row_id: int) -> bool:
+    try:
+        _sb().table("territorios").delete().eq("id", row_id).execute()
+        ler_territorios.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao excluir território: {e}")
+        return False
+
+def atualizar_territorio(row_id: int, campos: dict) -> bool:
+    try:
+        _sb().table("territorios").update(campos).eq("id", row_id).execute()
+        ler_territorios.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar território: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════
+# Metas de Faturamento (tabela: metas_faturamento)
+# ══════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=30)
+def ler_metas() -> pd.DataFrame:
+    try:
+        data = _safe_response(_sb().table("metas_faturamento").select("*").order("id").execute())
+        return pd.DataFrame(data) if data else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+def salvar_meta(ano: int, mes: int, valor: float) -> bool:
+    try:
+        existing = _sb().table("metas_faturamento").select("id")             .eq("Ano", ano).eq("Mes", mes).execute()
+        if existing.data:
+            _sb().table("metas_faturamento").update({"Meta": valor})                 .eq("Ano", ano).eq("Mes", mes).execute()
+        else:
+            _sb().table("metas_faturamento").insert(
+                {"Ano": ano, "Mes": mes, "Meta": valor}
+            ).execute()
+        ler_metas.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar meta: {e}")
+        return False
