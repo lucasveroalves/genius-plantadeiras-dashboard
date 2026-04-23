@@ -195,11 +195,17 @@ def grafico_top_produtos(df: pd.DataFrame, top_n: int = 15) -> go.Figure:
     else:
         colors = [_LARANJA] * len(df)
 
+    def _fmt_brl_completo(v):
+        try:
+            return f"R$ {float(v):,.2f}".replace(",","X").replace(".",",").replace("X",".")
+        except:
+            return "—"
+
     fig = go.Figure(go.Bar(
         x=df[col_valor],
         y=df["_label"],
         orientation="h",
-        text=df[col_valor].apply(_fmt_brl_compacto),
+        text=df[col_valor].apply(_fmt_brl_completo),
         textposition="outside",
         textfont=dict(size=10, color="#EEF2F8"),
         marker=dict(color=colors, line=dict(width=0)),
@@ -212,8 +218,11 @@ def grafico_top_produtos(df: pd.DataFrame, top_n: int = 15) -> go.Figure:
         font=dict(color=_TEXT, family="Inter, sans-serif", size=10),
         margin=dict(l=10, r=80, t=20, b=10),
         showlegend=False,
-        xaxis=dict(rangemode="tozero", showgrid=False, zeroline=False,
-                   tickfont=dict(color=_TEXT, size=9), title=None),
+        xaxis=dict(
+            rangemode="tozero", showgrid=False, zeroline=False,
+            tickfont=dict(color=_TEXT, size=9), title=None,
+            tickformat=",.0f",
+        ),
         yaxis=dict(showgrid=False, zeroline=False,
                    tickfont=dict(color="#EEF2F8", size=9), title=None, automargin=True),
         bargap=0.2,
