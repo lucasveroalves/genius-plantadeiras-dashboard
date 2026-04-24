@@ -263,12 +263,18 @@ def grafico_ranking_revendas_pecas(df: pd.DataFrame, top_n: int = 10) -> go.Figu
         .sort_values(col_val, ascending=True)  # topo = maior
     )
 
+    def _brl_full(v):
+        try:
+            return f"R$ {float(v):,.2f}".replace(",","X").replace(".",",").replace("X",".")
+        except:
+            return "—"
+
     fig = px.bar(
         df,
         x=col_val,
         y=col_rev,
         orientation="h",
-        text=df[col_val].apply(_fmt_brl_compacto),
+        text=df[col_val].apply(_brl_full),
         color_discrete_sequence=[_AZUL],
     )
 

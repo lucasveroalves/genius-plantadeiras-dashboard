@@ -459,24 +459,19 @@ def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:
     return top.sort_values("Valor_Total", ascending=False).head(10).reset_index(drop=True)
 
 
-def calcular_abc_por_revenda(df: pd.DataFrame, top_n_revendas: int = 20,
-                              lead_time_dias: int = 15) -> pd.DataFrame:
-    """
-    Calcula a Curva ABC de peças para cada Revenda individualmente.
-    
-    Para cada revenda:
-      1. Agrupa vendas por Produto
-      2. Calcula curva ABC (A=80%, B=95%, C=100%)
-      3. Calcula estoque mínimo sugerido = Média Diária × lead_time_dias
-    
-    Retorna DataFrame com:
-      Cliente_Revenda, Codigo, Descricao_Peca, Valor_Total, Quantidade,
-      Pct, Pct_Acum, Curva, Media_Diaria, Estoque_Minimo_Sugerido
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
+def calcular_abc_por_revenda(
+    df,
+    top_n_revendas=20,
+    lead_time_dias=15,
+    data_ini_filtro=None,
+    data_fim_filtro=None,
+):
+    import pandas as _pd
+    import numpy as _np
 
-    # Mapeia colunas
+    if df is None or df.empty:
+        return _pd.DataFrame(), 0, "", ""
+
     col_cli   = next((c for c in ["Cliente_Revenda","Cliente","cliente"] if c in df.columns), None)
     col_cod   = next((c for c in ["Codigo","Produto","produto","codigo"] if c in df.columns), None)
     col_valor = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq"] if c in df.columns), None)
@@ -485,35 +480,40 @@ def calcular_abc_por_revenda(df: pd.DataFrame, top_n_revendas: int = 20,
     col_data  = next((c for c in ["Data_Venda","Emissao","emissao"] if c in df.columns), None)
 
     if not col_cli or not col_cod or not col_valor:
-        return pd.DataFrame()
+        return _pd.DataFrame(), 0, "", ""
 
     df = df.copy()
     df["_cli"]   = df[col_cli].astype(str).str.strip()
     df["_cod"]   = df[col_cod].astype(str).str.strip()
-    df["_valor"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
-    df["_qtd"]   = pd.to_numeric(df[col_qtd], errors="coerce").fillna(0) if col_qtd else 0
+    df["_valor"] = _pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
+    df["_qtd"]   = _pd.to_numeric(df[col_qtd], errors="coerce").fillna(0) if col_qtd else 0
     df["_desc"]  = df[col_desc].astype(str) if col_desc else df["_cod"]
 
-    # Período para calcular média diária
+    ini_str = fim_str = "—"
+    dias_periodo = 365
+
     if col_data:
-        df["_data"] = pd.to_datetime(df[col_data], errors="coerce", dayfirst=True)
-        data_ini = df["_data"].min()
-        data_fim = df["_data"].max()
-        dias_periodo = max((data_fim - data_ini).days, 1)
-    else:
-        dias_periodo = 365
+        df["_data"] = _pd.to_datetime(df[col_data], errors="coerce", dayfirst=True)
+        if data_ini_filtro:
+            df = df[df["_data"].dt.date >= data_ini_filtro]
+        if data_fim_filtro:
+            df = df[df["_data"].dt.date <= data_fim_filtro]
+        if df.empty:
+            return _pd.DataFrame(), 0, "", ""
+        d_ini = df["_data"].min()
+        d_fim = df["_data"].max()
+        dias_periodo = max((d_fim - d_ini).days, 1)
+        ini_str = d_ini.strftime("%d/%m/%Y")
+        fim_str = d_fim.strftime("%d/%m/%Y")
 
-    resultados = []
-
-    # Top N revendas por faturamento
     top_revendas = (
         df.groupby("_cli")["_valor"].sum()
         .nlargest(top_n_revendas).index.tolist()
     )
 
+    resultados = []
     for revenda in top_revendas:
         df_rev = df[df["_cli"] == revenda].copy()
-        
         grp = df_rev.groupby("_cod").agg(
             Descricao_Peca=("_desc", "first"),
             Valor_Total=("_valor", "sum"),
@@ -522,7 +522,6 @@ def calcular_abc_por_revenda(df: pd.DataFrame, top_n_revendas: int = 20,
 
         if grp.empty:
             continue
-
         total_rev = grp["Valor_Total"].sum()
         if total_rev == 0:
             continue
@@ -533,19 +532,19 @@ def calcular_abc_por_revenda(df: pd.DataFrame, top_n_revendas: int = 20,
         grp["Curva"]    = grp["Pct_Acum"].apply(
             lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C")
         )
-
-        # Estoque mínimo
-        grp["Media_Diaria"]            = grp["Quantidade"] / dias_periodo
-        grp["Estoque_Minimo_Sugerido"] = (grp["Media_Diaria"] * lead_time_dias).round(1)
-        grp["Cliente_Revenda"]         = revenda
-
+        grp["Media_Diaria"] = grp["Quantidade"] / dias_periodo
+        grp["Estoque_Minimo_Sugerido"] = grp["Media_Diaria"].apply(
+            lambda x: max(round(x * lead_time_dias, 1), 1.0) if x > 0 else 0.0
+        )
+        grp["Cliente_Revenda"] = revenda
         resultados.append(grp)
 
     if not resultados:
-        return pd.DataFrame()
+        return _pd.DataFrame(), dias_periodo, ini_str, fim_str
 
-    return pd.concat(resultados, ignore_index=True)[[
-        "Cliente_Revenda", "Codigo", "Descricao_Peca",
-        "Valor_Total", "Quantidade", "Pct", "Pct_Acum", "Curva",
-        "Media_Diaria", "Estoque_Minimo_Sugerido"
+    df_final = _pd.concat(resultados, ignore_index=True)[[
+        "Cliente_Revenda","Codigo","Descricao_Peca",
+        "Valor_Total","Quantidade","Pct","Pct_Acum","Curva",
+        "Media_Diaria","Estoque_Minimo_Sugerido"
     ]]
+    return df_final, dias_periodo, ini_str, fim_str
