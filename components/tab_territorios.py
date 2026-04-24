@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import json
 import urllib.request
+import urllib.parse
 from data.db import ler_territorios, adicionar_territorio, excluir_territorio, atualizar_territorio
 
 # ── Coordenadas de cidades do Paraguai e Bolívia ─────────────
@@ -164,15 +165,39 @@ def _coordenadas_cidades_br() -> dict[str, tuple[float, float]]:
     }
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _buscar_coord_ibge(cidade: str, estado: str) -> tuple[float, float] | None:
+    """Busca coordenadas de município via API IBGE + Nominatim como fallback."""
+    try:
+        import urllib.request as _req, json as _json, time as _time
+
+        # Tenta Nominatim (OpenStreetMap) — mais preciso para municípios
+        cidade_enc = urllib.parse.quote(f"{cidade}, {estado}, Brasil")
+        url = f"https://nominatim.openstreetmap.org/search?q={cidade_enc}&format=json&limit=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "GeniusDashboard/1.0"})
+        with urllib.request.urlopen(req, timeout=4) as r:
+            data = _json.loads(r.read().decode())
+        if data:
+            return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception:
+        pass
+    return None
+
+
 def _get_coordenadas(cidade: str, estado: str = "") -> tuple[float, float] | None:
-    """Retorna coordenadas de uma cidade."""
-    # Tenta no dicionário estático BR
+    """Retorna coordenadas: dicionário estático → API IBGE → None."""
+    # 1. Dicionário estático BR
     cidades_br = _coordenadas_cidades_br()
-    if cidade in cidades_br:
+    if cidade in cidades_br and cidades_br[cidade]:
         return cidades_br[cidade]
-    # Tenta no dicionário PY/BO
+    # 2. Dicionário PY/BO
     if cidade in CIDADES_PY_BO:
         return CIDADES_PY_BO[cidade]
+    # 3. API Nominatim (para cidades não catalogadas)
+    if estado and estado not in ("Paraguai", "Bolívia"):
+        coord = _buscar_coord_ibge(cidade, estado)
+        if coord:
+            return coord
     return None
 
 

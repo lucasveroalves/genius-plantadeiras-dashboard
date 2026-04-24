@@ -235,10 +235,12 @@ def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str) -> tuple
         return criar_mock_pecas(), True
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def _ler_pecas_supabase() -> pd.DataFrame:
     """
-    Lê os dados de peças diretamente da tabela pecas_senior no Supabase.
-    Usa paginação para garantir que todas as linhas sejam lidas (>1000).
+    Lê peças do Supabase com cache de 1 hora.
+    Cache persiste entre sessões no mesmo worker — resolve o problema
+    de dados sumindo após inatividade.
     """
     try:
         from data.db import _sb
@@ -261,7 +263,6 @@ def _ler_pecas_supabase() -> pd.DataFrame:
         if not todos:
             return pd.DataFrame()
         df = pd.DataFrame(todos)
-        # Renomeia colunas para padrão interno se necessário
         rename = {
             "Emissao": "Data_Venda",
             "Produto": "Codigo",
@@ -300,20 +301,22 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
             st.session_state["_pecas_nome"] = _uploaded_file.name
         return df, is_mock
 
-    if "_pecas_df" in st.session_state:
-        nome = st.session_state.get("_pecas_nome", "Supabase")
-        st.sidebar.caption(f"📂 Peças: {nome}")
-        return st.session_state["_pecas_df"], False
-
-    # ── Lê direto do Supabase ──────────────────────────────────
-    with st.spinner("📡 Carregando peças do banco..."):
-        df_sb = _ler_pecas_supabase()
+    # Sempre tenta Supabase primeiro (cache de 1h evita lentidão)
+    # session_state apenas como cache secundário para a sessão atual
+    df_sb = _ler_pecas_supabase()
 
     if not df_sb.empty:
         st.session_state["_pecas_df"]   = df_sb
         st.session_state["_pecas_nome"] = "Supabase"
-        st.sidebar.caption(f"📂 Peças: {len(df_sb):,} registros do Supabase")
+        n = len(df_sb)
+        st.sidebar.caption(f"📂 Peças: {n:,} registros")
         return df_sb, False
+
+    # Fallback: session_state se Supabase falhou
+    if "_pecas_df" in st.session_state:
+        nome = st.session_state.get("_pecas_nome", "cache local")
+        st.sidebar.caption(f"📂 Peças: {nome} (cache)")
+        return st.session_state["_pecas_df"], False
 
     return criar_mock_pecas(), True
 
