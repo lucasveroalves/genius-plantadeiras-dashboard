@@ -576,7 +576,14 @@ tabs = st.tabs(abas_visiveis)
 
 for tab, nome in zip(tabs, abas_visiveis):
     with tab:
-        if nome == "👤 Admin":
-            render_painel_admin()
-        else:
-            MAPA[nome]()
+        try:
+            if nome == "👤 Admin":
+                render_painel_admin()
+            elif nome in MAPA:
+                MAPA[nome]()
+            else:
+                st.warning(f"Aba '{nome}' não configurada.")
+        except Exception as _e:
+            st.error(f"Erro ao carregar aba **{nome}**: {_e}")
+            import traceback
+            st.code(traceback.format_exc())
