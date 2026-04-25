@@ -21,7 +21,6 @@ from auth import tela_login, painel_usuario, render_painel_admin, is_admin, abas
 from data.loader import (
     preparar_pecas, calcular_kpis_pecas,
     calcular_curva_abc_por_codigo, calcular_top10_revendas,
-    calcular_abc_por_revenda,
 )
 from components.ui import (
     render_header, render_sidebar_uploads,
@@ -34,9 +33,9 @@ from components.forms        import (
     render_formulario_orcamento_pecas,
     render_formulario_revendas,
 )
+from components.tab_crm_maquinas import render_aba_crm_maquinas
 from components.nf_demo      import render_aba_nf_demo
 from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase, importar_catalogo_pecas, ler_catalogo_pecas, ler_lancamentos_pecas
-from components.tab_leadtime import render_tab_leadtime
 from components.tab_territorios import render_aba_territorios
 from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas, grafico_top_produtos
 
@@ -412,183 +411,125 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     if perfil == "comercial":
         st.divider()
 
-        _tab_lead, _tab_abc_rev = st.tabs([
-            "🕐 Lead Time",
-            "🏬 ABC + Estoque Mínimo por Revenda",
-        ])
-
-        with _tab_lead:
-            render_tab_leadtime()
-
-        with _tab_abc_rev:
-            _render_abc_por_revenda(df_filtrado)
+        _render_abc_por_revenda(df_filtrado)
 
 
 # ══════════════════════════════════════════════════════════════
 # [EST-MIN]  Sub-aba: Estoque Mínimo por Revenda
 # ══════════════════════════════════════════════════════════════
 
-def _render_abc_por_revenda(df: pd.DataFrame):
-    """ABC + Estoque Mínimo por Revenda — filtro de período + mínimo 1 unidade."""
-    from datetime import date as _date, timedelta as _td
-
+def _render_estoque_minimo(df: pd.DataFrame):
     st.markdown("""
 <div style="display:flex;align-items:center;gap:14px;padding:10px 0 18px;
             border-bottom:1px solid #2D3748;margin-bottom:20px;">
-  <div style="background:rgba(42,90,138,.2);border:1px solid rgba(42,90,138,.4);
-              border-radius:10px;padding:10px 14px;font-size:22px;">🏬</div>
+  <div style="background:rgba(52,183,120,.13);border:1px solid rgba(52,183,120,.4);
+              border-radius:10px;padding:10px 14px;font-size:22px;">📐</div>
   <div>
     <div style="font-family:'Barlow Condensed',sans-serif;font-size:1.7rem;
-                font-weight:700;color:#F0F4F8;">ABC + Estoque Mínimo por Revenda</div>
-    <div style="font-size:12px;color:#6A7A8A;margin-top:4px;">
-      Para cada revenda: classifica peças em A/B/C e sugere estoque mínimo baseado no histórico de vendas</div>
+                font-weight:700;color:#F0F4F8;line-height:1.1;">
+      Estoque Mínimo por Revenda</div>
+    <div style="font-size:12px;color:#6A7A8A;text-transform:uppercase;
+                letter-spacing:.07em;margin-top:4px;">
+      Fórmula: Média de Vendas Diárias × Lead Time (dias) · Sem IA · Pandas puro</div>
   </div>
 </div>""", unsafe_allow_html=True)
 
-    # ── Parâmetros ─────────────────────────────────────────────
-    with st.expander("⚙️ Configurar parâmetros", expanded=True):
-        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
-        hoje = _date.today()
-        with col1:
-            d0 = st.date_input("Período — De", value=_date(2020,1,1),
-                               format="DD/MM/YYYY", key="abc_rev_d0")
-        with col2:
-            d1 = st.date_input("Período — Até", value=hoje,
-                               format="DD/MM/YYYY", key="abc_rev_d1")
-        with col3:
-            lead_time = st.number_input("Lead Time (dias)", min_value=1, max_value=90,
-                                        value=15, step=1, key="abc_rev_lead",
-                                        help="Quantos dias leva para reabastecer o estoque da revenda")
-        with col4:
-            top_n_rev = st.number_input("Top N Revendas", min_value=1, max_value=50,
-                                        value=10, step=1, key="abc_rev_topn",
-                                        help="Analisa as N revendas com maior faturamento")
-
-        st.caption(
-            f"📅 Período: {d0.strftime('%d/%m/%Y')} → {d1.strftime('%d/%m/%Y')} · "
-            f"⏱️ Lead Time: {lead_time} dias · "
-            f"💡 Estoque Mín. = Média de vendas por dia × {lead_time} dias (mínimo 1 unidade)"
+    col_lt, col_btn = st.columns([2, 1])
+    with col_lt:
+        lead_time = st.number_input(
+            "Lead Time (dias)", min_value=1, max_value=90,
+            value=15, step=1, key="est_min_lead",
+            help="Quantidade de dias que leva para reabastecer o estoque.",
         )
-        calcular = st.button("⚙️ Calcular", key="btn_abc_rev", type="primary",
-                             use_container_width=True)
+    with col_btn:
+        st.write("")
+        calcular = st.button("⚙️ Calcular", key="btn_calcular_estmin", type="primary")
 
-    if not calcular and "df_abc_rev_cache" not in st.session_state:
-        st.info("Configure os parâmetros acima e clique em **Calcular**.")
+    if not calcular and "df_estmin_cache" not in st.session_state:
+        st.info("Clique em **Calcular** para gerar a análise de estoque mínimo.")
         return
 
-    if calcular:
-        with st.spinner("Calculando ABC por revenda..."):
-            df_result, dias, ini_str, fim_str = calcular_abc_por_revenda(
-                df,
-                top_n_revendas=int(top_n_rev),
-                lead_time_dias=int(lead_time),
-                data_ini_filtro=d0,
-                data_fim_filtro=d1,
-            )
-            st.session_state["df_abc_rev_cache"] = df_result
-            st.session_state["df_abc_rev_dias"]  = dias
-            st.session_state["df_abc_rev_ini"]   = ini_str
-            st.session_state["df_abc_rev_fim"]   = fim_str
+    with st.spinner("Calculando estoque mínimo..."):
+        df_estmin = _calcular_estoque_minimo(df, lead_time_dias=int(lead_time))
+        st.session_state["df_estmin_cache"] = df_estmin
+    
+    df_estmin = st.session_state.get("df_estmin_cache", pd.DataFrame())
 
-    df_result = st.session_state.get("df_abc_rev_cache", pd.DataFrame())
-    dias      = st.session_state.get("df_abc_rev_dias", 0)
-    ini_str   = st.session_state.get("df_abc_rev_ini", "")
-    fim_str   = st.session_state.get("df_abc_rev_fim", "")
-
-    if df_result.empty:
-        st.warning("Sem dados para o período selecionado.")
+    if df_estmin.empty:
+        st.warning("⚠️ Não foi possível calcular. Verifique se o DataFrame contém as colunas: "
+                   "`Data_Venda`, `Codigo_Peca`, `Quantidade`, `Revenda`.")
         return
 
-    # ── Legenda explicativa ────────────────────────────────────
-    with st.expander("📖 Como interpretar esta tabela", expanded=False):
-        st.markdown(f"""
-| Coluna | Significado |
-|--------|-------------|
-| **Curva** | **A** = produtos que somam 80% do faturamento da revenda (os mais importantes) · **B** = próximos 15% · **C** = últimos 5% |
-| **Valor_Total** | Total faturado desta peça para esta revenda no período |
-| **Quantidade** | Total de unidades vendidas no período ({ini_str} → {fim_str}, {dias} dias) |
-| **Pct** | % que esta peça representa no faturamento total da revenda |
-| **Pct_Acum** | % acumulado (quando chega a 80% = fim da classe A) |
-| **Media_Diaria** | Quantidade ÷ {dias} dias = velocidade de venda por dia |
-| **Estoque_Mínimo** | Media_Diaria × {lead_time} dias de lead time (mínimo 1 unidade) |
-        """)
+    # ── KPIs rápidos ───────────────────────────────────────────
+    total_itens   = len(df_estmin)
+    abaixo_count  = int(df_estmin["Abaixo_Minimo"].sum())
+    pct_critico   = (abaixo_count / total_itens * 100) if total_itens else 0
 
-    # ── KPIs ───────────────────────────────────────────────────
-    n_rev  = df_result["Cliente_Revenda"].nunique()
-    n_a    = (df_result["Curva"] == "A").sum()
-    n_b    = (df_result["Curva"] == "B").sum()
-    n_c    = (df_result["Curva"] == "C").sum()
-    k1,k2,k3,k4 = st.columns(4)
-    k1.metric("🏬 Revendas", n_rev)
-    k2.metric("🟠 SKUs Classe A", n_a)
-    k3.metric("🟢 SKUs Classe B", n_b)
-    k4.metric("🔵 SKUs Classe C", n_c)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("📦 Combinações Peça × Revenda", f"{total_itens:,}".replace(",", "."))
+    k2.metric("🔴 Abaixo do Mínimo",           f"{abaixo_count:,}".replace(",", "."))
+    k3.metric("⚠️ % Crítico",                  f"{pct_critico:.1f}%")
 
     st.divider()
 
-    # ── Filtros ────────────────────────────────────────────────
-    revendas = ["Todas"] + sorted(df_result["Cliente_Revenda"].unique().tolist())
-    c1,c2,c3 = st.columns([3,2,2])
-    with c1:
-        rev_sel = st.selectbox("🏬 Revenda", revendas, key="abc_rev_filtro_rev")
-    with c2:
-        curva_sel = st.multiselect("Curva", ["A","B","C"], default=["A"], key="abc_rev_filtro_curva")
-    with c3:
-        busca = st.text_input("🔍 Buscar produto", key="abc_rev_busca",
-                              placeholder="código ou descrição")
+    # ── Filtros de exibição ────────────────────────────────────
+    col_f1, col_f2 = st.columns([3, 1])
+    with col_f1:
+        busca = st.text_input("🔍 Filtrar por peça ou revenda", key="est_min_busca",
+                               placeholder="Ex: 123456 ou Revenda João")
+    with col_f2:
+        apenas_criticos = st.checkbox("Mostrar só críticos 🔴", key="est_min_criticos")
 
-    df_show = df_result.copy()
-    if rev_sel != "Todas":
-        df_show = df_show[df_show["Cliente_Revenda"] == rev_sel]
-    if curva_sel:
-        df_show = df_show[df_show["Curva"].isin(curva_sel)]
+    df_show = df_estmin.copy()
+    if apenas_criticos:
+        df_show = df_show[df_show["Abaixo_Minimo"]]
     if busca.strip():
         mask = (
-            df_show["Codigo"].astype(str).str.contains(busca, case=False, na=False)
-            | df_show["Descricao_Peca"].astype(str).str.contains(busca, case=False, na=False)
+            df_show["Codigo_Peca"].astype(str).str.contains(busca, case=False, na=False)
+            | df_show["Revenda"].astype(str).str.contains(busca, case=False, na=False)
         )
         df_show = df_show[mask]
 
-    # ── Tabela formatada ───────────────────────────────────────
-    def _brl(v):
-        try: return f"R$ {float(v):,.2f}".replace(",","X").replace(".",",").replace("X",".")
-        except: return "—"
-
-    def _highlight(row):
-        cores = {
-            "A": "background:rgba(230,126,34,.15);color:#F0A84E",
-            "B": "background:rgba(61,153,112,.15);color:#52B788",
-            "C": "background:rgba(42,90,138,.15);color:#7EB8E8",
-        }
-        cor = cores.get(str(row.get("Curva","")), "")
+    # ── Tabela estilizada ──────────────────────────────────────
+    # Highlight vermelho em linhas abaixo do mínimo
+    def _highlight_critico(row):
+        cor = "background-color: rgba(232,64,64,.18); color: #E87878;" if row["Abaixo_Minimo"] else ""
         return [cor] * len(row)
 
-    df_exib = df_show.copy()
-    df_exib["Valor_Total"]             = df_exib["Valor_Total"].apply(_brl)
-    df_exib["Pct"]                     = df_exib["Pct"].round(2).astype(str) + "%"
-    df_exib["Pct_Acum"]               = df_exib["Pct_Acum"].round(2).astype(str) + "%"
-    df_exib["Media_Diaria"]           = df_exib["Media_Diaria"].round(4)
-    df_exib["Estoque_Minimo_Sugerido"] = df_exib["Estoque_Minimo_Sugerido"].round(1)
+    cols_exibir = [c for c in [
+        "Codigo_Peca", "Descricao", "Revenda",
+        "Total_Vendido", "Media_Diaria",
+        "Estoque_Minimo_Sugerido", "Estoque_Atual", "Abaixo_Minimo",
+    ] if c in df_show.columns]
 
-    cols_exib = [c for c in [
-        "Cliente_Revenda","Codigo","Descricao_Peca","Curva",
-        "Valor_Total","Quantidade","Pct","Pct_Acum",
-        "Media_Diaria","Estoque_Minimo_Sugerido",
-    ] if c in df_exib.columns]
-
-    st.dataframe(
-        df_exib[cols_exib].style.apply(_highlight, axis=1),
-        use_container_width=True, height=500
+    styled = (
+        df_show[cols_exibir]
+        .style
+        .apply(_highlight_critico, axis=1)
+        .format({
+            "Total_Vendido":           "{:.0f}",
+            "Media_Diaria":            "{:.2f}",
+            "Estoque_Minimo_Sugerido": "{:.1f}",
+            "Estoque_Atual":           "{:.1f}",
+        })
     )
+
+    st.dataframe(styled, use_container_width=True, height=500)
     st.caption(
-        f"📊 {len(df_show):,} linha(s) · Período: {ini_str} → {fim_str} "
-        f"({dias} dias) · Lead time: {lead_time} dias"
+        f"🔢 {len(df_show):,} linha(s) exibida(s) · "
+        f"Lead time: {int(lead_time)} dias · "
+        f"Fórmula: Estoque Mín. = Média Diária × {int(lead_time)}"
     )
 
-    csv = df_show.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-    st.download_button("📥 Exportar (.csv)", data=csv,
-                       file_name=f"abc_revenda_lead{lead_time}d.csv",
-                       mime="text/csv", key="dl_abc_rev")
+    # ── Download CSV ───────────────────────────────────────────
+    csv_bytes = df_show[cols_exibir].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+    st.download_button(
+        "📥 Exportar tabela (.csv)",
+        data=csv_bytes,
+        file_name=f"estoque_minimo_lead{int(lead_time)}d.csv",
+        mime="text/csv",
+        key="dl_estmin",
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -597,7 +538,7 @@ def _render_abc_por_revenda(df: pd.DataFrame):
 MAPA = {
     "📝 Orçamento de Peças":   lambda: render_formulario_orcamento_pecas(),
     "🏬 Revendas":             lambda: render_formulario_revendas(),
-    "➕ Orçamento de Máquina": lambda: render_formulario_negociacao(),
+    "🤝 Pipeline Máquinas":    lambda: render_aba_crm_maquinas(),
     "⚙️ PCP":                  lambda: render_aba_pcp(),
     "📦 Estoque de Máquinas":  lambda: render_aba_estoque(),
     "📄 NF em Demonstração":   lambda: render_aba_nf_demo(),

@@ -17,7 +17,7 @@ from data.db import ler_usuarios, alterar_senha, criar_usuario, excluir_usuario,
 # ── Abas disponíveis no sistema ───────────────────────────────
 TODAS_ABAS = [
     "🏬 Revendas",
-    "➕ Orçamento de Máquina",
+    "🤝 Pipeline Máquinas",
     "⚙️ PCP",
     "📦 Estoque de Máquinas",
     "📄 NF em Demonstração",

@@ -202,110 +202,111 @@ def _get_coordenadas(cidade: str, estado: str = "") -> tuple[float, float] | Non
 
 
 def _construir_mapa(df_terr: pd.DataFrame) -> go.Figure:
-    """Constrói mapa interativo com os territórios."""
-    fig = go.Figure()
+    """Constrói mapa interativo com os territórios usando plotly graph_objects."""
 
-    # Mapa base — Brasil, Paraguai, Bolívia
-    fig.update_layout(
-        geo=dict(
-            scope="south america",
-            showland=True,
-            landcolor="#1A2332",
-            showocean=True,
-            oceancolor="#0D1117",
-            showcountries=True,
-            countrycolor="#4A5568",
-            showcoastlines=True,
-            coastlinecolor="#4A5568",
-            showsubunits=True,
-            subunitcolor="#4A5568",
-            subunitwidth=1,
-            showlakes=False,
-            bgcolor="#12171D",
-            center=dict(lat=-25, lon=-54),
-            projection_scale=3.8,
-            lataxis=dict(range=[-34, -10]),
-            lonaxis=dict(range=[-60, -44]),
-        ),
-        paper_bgcolor="#12171D",
-        plot_bgcolor="#12171D",
-        font=dict(color="#EEF2F8", family="Inter, sans-serif"),
-        margin=dict(l=0, r=0, t=30, b=0),
-        height=600,
-        showlegend=True,
-        legend=dict(
-            bgcolor="rgba(30,38,46,0.9)",
-            bordercolor="#3A4858",
-            borderwidth=1,
-            font=dict(size=11, color="#EEF2F8"),
-        ),
-    )
+    # Monta lista de pontos
+    rows_map = []
 
     if df_terr.empty:
-        # Mesmo sem dados mostra o mapa base com países destacados
-        # Destaca Brasil, Paraguai e Bolívia
-        for pais, lat, lon, cor in [
-            ("🇧🇷 Brasil", -15.0, -53.0, "#E67E22"),
-            ("🇵🇾 Paraguai", -23.4, -58.4, "#3D9970"),
-            ("🇧🇴 Bolívia", -16.5, -64.5, "#2A5A8A"),
-        ]:
-            fig.add_trace(go.Scattergeo(
-                lat=[lat], lon=[lon],
-                mode="markers+text",
-                marker=dict(size=12, color=cor, opacity=0.6),
-                text=[pais],
-                textposition="top center",
-                textfont=dict(size=11, color=cor),
-                name=pais,
-                hovertemplate=f"{pais}<extra></extra>",
-            ))
-        fig.add_annotation(
-            text="Cadastre revendas na aba abaixo para visualizar os territórios",
-            x=0.5, y=0.02, xref="paper", yref="paper",
-            font=dict(size=12, color="#6A7A8A"),
-            showarrow=False,
-        )
-        return fig
-
-    # Agrupa por revenda
-    revendas = df_terr["Revenda"].unique() if "Revenda" in df_terr.columns else []
-
-    for i, revenda in enumerate(revendas):
-        cor = CORES[i % len(CORES)]
-        df_rev = df_terr[df_terr["Revenda"] == revenda]
-
-        lats, lons, textos = [], [], []
-        for _, row in df_rev.iterrows():
+        # Pontos dos 3 países para mostrar o mapa mesmo vazio
+        rows_map = [
+            {"lat": -15.0, "lon": -53.0, "Revenda": "🇧🇷 Brasil",
+             "Cidade": "Brasil", "Estado": "BR", "Representante": ""},
+            {"lat": -23.4, "lon": -58.4, "Revenda": "🇵🇾 Paraguai",
+             "Cidade": "Paraguai", "Estado": "PY", "Representante": ""},
+            {"lat": -16.5, "lon": -64.5, "Revenda": "🇧🇴 Bolívia",
+             "Cidade": "Bolívia", "Estado": "BO", "Representante": ""},
+        ]
+    else:
+        for _, row in df_terr.iterrows():
             cidade = str(row.get("Cidade", "")).strip()
             estado = str(row.get("Estado", "")).strip()
             coords = _get_coordenadas(cidade, estado)
             if coords:
-                lats.append(coords[0])
-                lons.append(coords[1])
-                representante = row.get("Representante", "")
-                textos.append(
-                    f"<b>{cidade}</b><br>"
-                    f"Revenda: {revenda}<br>"
-                    f"Representante: {representante}<br>"
-                    f"Estado: {estado}"
-                )
+                rows_map.append({
+                    "lat": coords[0],
+                    "lon": coords[1],
+                    "Revenda": str(row.get("Revenda", "—")),
+                    "Cidade": cidade,
+                    "Estado": estado,
+                    "Representante": str(row.get("Representante", "")),
+                })
 
-        if lats:
-            fig.add_trace(go.Scattergeo(
-                lat=lats,
-                lon=lons,
-                mode="markers",
-                marker=dict(
-                    size=10,
-                    color=cor,
-                    opacity=0.85,
-                    line=dict(width=1, color="#12171D"),
-                ),
-                name=revenda[:25],
-                hovertemplate="%{text}<extra></extra>",
-                text=textos,
-            ))
+    if not rows_map:
+        # Nenhuma coordenada encontrada — mostra aviso
+        fig = go.Figure()
+        fig.update_layout(
+            paper_bgcolor="#12171D",
+            plot_bgcolor="#12171D",
+            height=300,
+            annotations=[dict(
+                text="⚠️ Nenhuma coordenada encontrada para as cidades cadastradas.<br>"
+                     "Verifique se os nomes das cidades estão corretos.",
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                font=dict(size=13, color="#E8A020"),
+                showarrow=False,
+            )]
+        )
+        return fig
 
+    import pandas as _pd
+    df_map = _pd.DataFrame(rows_map)
+
+    # Mapa de cores por revenda
+    revendas_unicas = df_map["Revenda"].unique().tolist()
+    color_map = {r: CORES[i % len(CORES)] for i, r in enumerate(revendas_unicas)}
+    df_map["cor"] = df_map["Revenda"].map(color_map)
+    df_map["texto"] = df_map.apply(
+        lambda r: f"<b>{r['Cidade']}</b><br>Revenda: {r['Revenda']}<br>"
+                  f"Representante: {r['Representante']}<br>Estado: {r['Estado']}",
+        axis=1
+    )
+
+    fig = go.Figure()
+
+    for revenda in revendas_unicas:
+        df_r = df_map[df_map["Revenda"] == revenda]
+        cor  = color_map[revenda]
+        fig.add_trace(go.Scattergeo(
+            lat=df_r["lat"].tolist(),
+            lon=df_r["lon"].tolist(),
+            mode="markers",
+            name=revenda[:30],
+            marker=dict(size=11, color=cor, opacity=0.9,
+                        line=dict(width=1, color="#12171D")),
+            text=df_r["texto"].tolist(),
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    fig.update_layout(
+        geo=dict(
+            scope="south america",
+            showland=True,      landcolor="#1E2A3A",
+            showocean=True,     oceancolor="#0D1520",
+            showcountries=True, countrycolor="#5A6A7A",
+            showcoastlines=True,coastlinecolor="#5A6A7A",
+            showsubunits=True,  subunitcolor="#3A4858",
+            showlakes=False,
+            bgcolor="#12171D",
+            center=dict(lat=-25, lon=-52),
+            projection_scale=3.5,
+            lataxis=dict(range=[-34, -8]),
+            lonaxis=dict(range=[-62, -42]),
+        ),
+        paper_bgcolor="#12171D",
+        plot_bgcolor="#12171D",
+        font=dict(color="#EEF2F8", family="Inter, sans-serif", size=11),
+        margin=dict(l=0, r=0, t=10, b=0),
+        height=580,
+        showlegend=True,
+        legend=dict(
+            bgcolor="rgba(20,30,40,0.95)",
+            bordercolor="#3A4858",
+            borderwidth=1,
+            font=dict(size=11, color="#EEF2F8"),
+            x=0.01, y=0.99,
+        ),
+    )
     return fig
 
 
