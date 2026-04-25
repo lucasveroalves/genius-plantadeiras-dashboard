@@ -1,39 +1,47 @@
 """
-data/loader.py — Genius Implementos Agrícolas v16
+data/loader.py — Genius Implementos Agrícolas v16 (AUDITORIA)
 
 Correções aplicadas:
-  [FIX-BUG-4]  calcular_kpis_pecas: df_orc filtrado pelo mesmo período das peças
-  [FIX-PERF-5] limpar_moeda_brl: pipeline vetorizado (10-50x mais rápido)
-  [FIX-PERF-6] @st.cache_data com ttl=300 por entrada
-  [FIX-BUG-2]  tz_convert(None) para dados tz-aware
-  [FIX-BUG-3]  dropna() antes de comparação de datas
-  [FIX-SENIOR] Reescrita completa baseada na estrutura real do Senior ERP:
-               - Cabeçalho detectado automaticamente por varredura (geralmente linha 4)
-               - Coluna "Produto"       → Codigo da peça (ex: 200001114)
-               - Coluna "Cliente"       → código numérico (ignorado)
-               - Coluna unnamed após "Cliente" → Nome do cliente → Cliente_Revenda
-               - Coluna "Emissão"       → Data_Venda
-               - Linhas "Família:" removidas automaticamente
-               - Dados da planilha ACUMULAM com lançamentos manuais (nunca sobrescrevem)
+  [FIX-IMPORT-1] Adicionadas constantes STATUS_FATURADO_LOWER, STATUS_PIPELINE_LOWER,
+                 STATUS_ALERTA_LOWER que calculators.py importa — estavam faltando.
+  [FIX-BUG-4]   calcular_kpis_pecas: df_orc filtrado pelo mesmo período das peças.
+  [FIX-PERF-5]  limpar_moeda_brl: pipeline vetorizado (10-50x mais rápido).
+  [FIX-PERF-6]  @st.cache_data com ttl=300 por entrada.
+  [FIX-BUG-2]   tz_convert(None) para dados tz-aware.
+  [FIX-BUG-3]   dropna() antes de comparação de datas.
+  [FIX-SENIOR]  Reescrita completa baseada na estrutura real do Senior ERP.
 """
 
 from __future__ import annotations
 import io, unicodedata, hashlib
 import pandas as pd
 import streamlit as st
-# cache de peças via session_state
 
 
-# ── Utilitários ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# [FIX-IMPORT-1] Constantes de status importadas por calculators.py
+# ══════════════════════════════════════════════════════════════
+
+STATUS_FATURADO_LOWER  = ["faturado", "entregue", "pedido fechado"]
+STATUS_PIPELINE_LOWER  = ["em negociação", "em aberto", "crédito", "pronto para faturar",
+                           "pedido fechado", "faturado"]
+STATUS_ALERTA_LOWER    = ["em negociação", "em aberto"]
+
+
+# ══════════════════════════════════════════════════════════════
+# Utilitários
+# ══════════════════════════════════════════════════════════════
 
 def _norm_col(c: str) -> str:
     return (unicodedata.normalize("NFKD", str(c))
             .encode("ascii", "ignore").decode("ascii")
             .strip().replace(" ", "_").replace(".", "_"))
 
+
 def limpar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [_norm_col(c) for c in df.columns]
     return df
+
 
 def limpar_moeda_brl(serie: pd.Series) -> pd.Series:
     """[FIX-PERF-5] Conversão vetorizada."""
@@ -50,6 +58,7 @@ def limpar_moeda_brl(serie: pd.Series) -> pd.Series:
     result[~mask_br] = pd.to_numeric(s_en, errors="coerce")
     return result.fillna(0.0)
 
+
 def criar_mock_pecas() -> pd.DataFrame:
     return pd.DataFrame(columns=[
         "Codigo", "Descricao_Peca", "Quantidade", "Valor_Unitario",
@@ -57,14 +66,11 @@ def criar_mock_pecas() -> pd.DataFrame:
     ])
 
 
-# ── Leitura do arquivo Senior ERP ────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# Leitura do arquivo Senior ERP
+# ══════════════════════════════════════════════════════════════
 
 def _encontrar_linha_cabecalho(df_raw: pd.DataFrame) -> int:
-    """
-    Varre o DataFrame (lido sem header) procurando a linha que contém
-    ao menos 2 das palavras-chave do relatório Senior.
-    Retorna o índice da linha ou 4 como fallback.
-    """
     keywords = {"emissao", "emissao_", "produto", "vlr", "cliente",
                 "qtde", "preco", "serie", "numero"}
     for i in range(min(20, len(df_raw))):
@@ -81,11 +87,6 @@ def _encontrar_linha_cabecalho(df_raw: pd.DataFrame) -> int:
 
 
 def _ler_senior_xlsx(file_bytes: bytes) -> pd.DataFrame:
-    """
-    Lê o xlsx do Senior em duas passagens:
-    1. Sem header para detectar a linha do cabeçalho
-    2. Com header na linha detectada
-    """
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine="openpyxl")
     header_row = _encontrar_linha_cabecalho(df_raw)
     df = pd.read_excel(io.BytesIO(file_bytes), header=header_row, engine="openpyxl")
@@ -93,36 +94,26 @@ def _ler_senior_xlsx(file_bytes: bytes) -> pd.DataFrame:
 
 
 def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normaliza o DataFrame bruto do Senior para o schema interno.
-
-    Regra especial para Cliente_Revenda:
-      Senior exporta CÓDIGO em "Cliente" e NOME na coluna unnamed seguinte.
-      Precisamos do NOME para o Top 10 Revendas.
-    """
-    # ── Passo 1: capturar coluna de nome do cliente ANTES de normalizar ──
+    # Passo 1: capturar coluna de nome do cliente ANTES de normalizar
     cols_orig = list(df.columns)
     nome_cliente_col_orig = None
     for i, col in enumerate(cols_orig):
         if str(col).strip().lower() == "cliente":
             if i + 1 < len(cols_orig):
                 prox = str(cols_orig[i + 1]).strip()
-                # Coluna unnamed ou vazia após "Cliente" = nome do cliente
                 if prox.startswith("Unnamed") or prox == "" or prox.lower() == "nan":
                     nome_cliente_col_orig = cols_orig[i + 1]
             break
 
-    # ── Passo 2: normalizar nomes de colunas ─────────────────────────
+    # Passo 2: normalizar nomes de colunas
     df = limpar_colunas(df)
-
-    # Nome normalizado da coluna do cliente (para usar no rename_map)
     nome_cliente_col_norm = (_norm_col(str(nome_cliente_col_orig))
                              if nome_cliente_col_orig is not None else None)
 
-    # ── Passo 3: renomear para schema interno ────────────────────────
+    # Passo 3: renomear para schema interno
     mapeamento = {
         "Emissao":           "Data_Venda",
-        "Emissao_":          "Data_Venda",   # "Emissão" → após _norm_col
+        "Emissao_":          "Data_Venda",
         "Data":              "Data_Venda",
         "Produto":           "Codigo",
         "Qtde_Fat_":         "Quantidade",
@@ -132,19 +123,15 @@ def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
         "Descricao":         "Descricao_Peca",
         "Descricao_Produto": "Descricao_Peca",
     }
-
-    # Mapeia a coluna de nome do cliente identificada acima
     if nome_cliente_col_norm and nome_cliente_col_norm in df.columns:
         mapeamento[nome_cliente_col_norm] = "Cliente_Revenda"
     elif "Cliente" in df.columns:
-        # Fallback: usa o campo "Cliente" (código numérico) se não achou o nome
         mapeamento["Cliente"] = "Cliente_Revenda"
 
-    rename_map = {k: v for k, v in mapeamento.items()
-                  if k in df.columns and k != v}
+    rename_map = {k: v for k, v in mapeamento.items() if k in df.columns and k != v}
     df = df.rename(columns=rename_map)
 
-    # ── Passo 4: remover linhas de agrupamento por Família ───────────
+    # Passo 4: remover linhas de agrupamento por Família
     if "Serie" in df.columns:
         df = df[~df["Serie"].astype(str).str.strip().str.lower().isin(
             ["família:", "familia:", "familia", "família", "famlia:"]
@@ -154,39 +141,37 @@ def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
             r"Família|Familia|^nan$", na=False, regex=True
         )]
 
-    # ── Passo 5: filtrar apenas linhas com código de peça válido ─────
+    # Passo 5: filtrar apenas linhas com código de peça válido
     if "Codigo" in df.columns:
         df = df.dropna(subset=["Codigo"])
-        # Produto vem como float (200001114.0) do Excel — converter para int string
+
         def _norm_codigo(v):
             try:
                 return str(int(float(str(v).strip())))
             except Exception:
                 return str(v).strip()
+
         df["Codigo"] = df["Codigo"].apply(_norm_codigo)
         df = df[df["Codigo"] != ""]
         df = df[df["Codigo"].str.lower() != "nan"]
-        # Códigos Senior são numéricos (ex: 200001114)
         df = df[df["Codigo"].str.match(r"^\d+$", na=False)]
 
     if df.empty:
         return df
 
-    # ── Passo 6: converter tipos ──────────────────────────────────────
+    # Passo 6: converter tipos
     if "Quantidade" in df.columns:
         df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
-
     for col in ["Valor_Unitario", "Valor_Total"]:
         if col in df.columns:
             df[col] = limpar_moeda_brl(df[col])
-
     if "Data_Venda" in df.columns:
         df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
         if df["Data_Venda"].dt.tz is not None:
             df["Data_Venda"] = df["Data_Venda"].dt.tz_localize(None)
         df = df.dropna(subset=["Data_Venda"])
 
-    # ── Passo 7: limpar Cliente_Revenda ──────────────────────────────
+    # Passo 7: limpar Cliente_Revenda
     if "Cliente_Revenda" not in df.columns:
         df["Cliente_Revenda"] = "Não informado"
     else:
@@ -195,7 +180,7 @@ def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
                                  .astype(str).str.strip())
         df.loc[df["Cliente_Revenda"].isin(["", "nan"]), "Cliente_Revenda"] = "Não informado"
 
-    # ── Passo 8: colunas obrigatórias ─────────────────────────────────
+    # Passo 8: colunas obrigatórias
     df["Status_Peca"] = "Faturado"
     for col in ["Codigo", "Descricao_Peca", "Quantidade", "Valor_Unitario",
                 "Valor_Total", "Cliente_Revenda", "Data_Venda", "Status_Peca"]:
@@ -205,7 +190,9 @@ def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-# ── Cache e processamento ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# Cache e processamento
+# ══════════════════════════════════════════════════════════════
 
 def _file_hash(file_bytes: bytes) -> str:
     return hashlib.md5(file_bytes).hexdigest()
@@ -217,16 +204,13 @@ def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str) -> tuple
     try:
         df_raw = _ler_senior_xlsx(file_bytes)
         df     = _processar_senior(df_raw)
-
         if df.empty:
             st.warning(
                 f"⚠️ A planilha '{file_name}' foi lida mas nenhum registro de peça foi encontrado.\n"
                 "Verifique se há linhas com código de produto numérico (ex: 200001114)."
             )
             return criar_mock_pecas(), True
-
         return df, False
-
     except Exception as e:
         st.error(
             f"❌ Erro ao processar '{file_name}': {e}\n\n"
@@ -237,11 +221,7 @@ def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str) -> tuple
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _ler_pecas_supabase() -> pd.DataFrame:
-    """
-    Lê peças do Supabase com cache de 1 hora.
-    Cache persiste entre sessões no mesmo worker — resolve o problema
-    de dados sumindo após inatividade.
-    """
+    """Lê peças do Supabase com cache de 1 hora."""
     try:
         from data.db import _sb
         client = _sb()
@@ -264,10 +244,10 @@ def _ler_pecas_supabase() -> pd.DataFrame:
             return pd.DataFrame()
         df = pd.DataFrame(todos)
         rename = {
-            "Emissao": "Data_Venda",
-            "Produto": "Codigo",
+            "Emissao":   "Data_Venda",
+            "Produto":   "Codigo",
             "Qtde_Fat_": "Quantidade",
-            "Vlr_Liq_": "Valor_Total",
+            "Vlr_Liq_":  "Valor_Total",
             "Preco_Un_": "Valor_Unitario",
         }
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
@@ -287,8 +267,8 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
     """
     Hierarquia de fontes:
     1. Upload novo → processa + importa para Supabase + salva em session_state
-    2. session_state (mesma sessão, já processado)
-    3. Supabase (pecas_senior) — fonte principal em produção
+    2. Supabase (pecas_senior) — fonte principal em produção
+    3. session_state (fallback se Supabase falhou)
     4. Mock (fallback quando banco vazio)
     """
     if _uploaded_file is not None:
@@ -301,10 +281,7 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
             st.session_state["_pecas_nome"] = _uploaded_file.name
         return df, is_mock
 
-    # Sempre tenta Supabase primeiro (cache de 1h evita lentidão)
-    # session_state apenas como cache secundário para a sessão atual
     df_sb = _ler_pecas_supabase()
-
     if not df_sb.empty:
         st.session_state["_pecas_df"]   = df_sb
         st.session_state["_pecas_nome"] = "Supabase"
@@ -312,7 +289,6 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
         st.sidebar.caption(f"📂 Peças: {n:,} registros")
         return df_sb, False
 
-    # Fallback: session_state se Supabase falhou
     if "_pecas_df" in st.session_state:
         nome = st.session_state.get("_pecas_nome", "cache local")
         st.sidebar.caption(f"📂 Peças: {nome} (cache)")
@@ -321,14 +297,15 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
     return criar_mock_pecas(), True
 
 
-# ── KPIs ──────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# KPIs
+# ══════════════════════════════════════════════════════════════
 
 def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
                         data_inicio=None, data_fim=None) -> dict:
     """[FIX-BUG-4] df_orc filtrado pelo mesmo período de datas que df."""
     _zero = {"total_faturado": 0, "total_pedidos": 0,
-             "volume_itens": 0, "ticket_medio": 0, "qtd_skus": 0,
-             "em_orcamento": 0}
+             "volume_itens": 0, "ticket_medio": 0, "qtd_skus": 0, "em_orcamento": 0}
 
     if df is None or df.empty:
         fat = pd.DataFrame()
@@ -336,10 +313,9 @@ def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
         n = qtd_skus = 0
     else:
         fat = df.copy()
-        # Mapeia colunas do Senior ERP para nomes padronizados
-        col_valor = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq","Vlr.Liq."] if c in fat.columns), None)
-        col_qtd   = next((c for c in ["Quantidade","Qtde_Fat_","qtde_fat","Qtde.Fat."] if c in fat.columns), None)
-        col_cod   = next((c for c in ["Codigo","Produto","produto","codigo"] if c in fat.columns), None)
+        col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq", "Vlr.Liq."] if c in fat.columns), None)
+        col_qtd   = next((c for c in ["Quantidade", "Qtde_Fat_", "qtde_fat", "Qtde.Fat."] if c in fat.columns), None)
+        col_cod   = next((c for c in ["Codigo", "Produto", "produto", "codigo"] if c in fat.columns), None)
         faturamento = pd.to_numeric(fat[col_valor], errors="coerce").fillna(0).sum() if col_valor else 0.0
         volume      = pd.to_numeric(fat[col_qtd],   errors="coerce").fillna(0).sum() if col_qtd   else 0.0
         n           = len(fat)
@@ -361,7 +337,7 @@ def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
                 df_orc_f = df_orc_f[(d.dt.date >= data_inicio) & (d.dt.date <= data_fim)]
             except Exception:
                 pass
-        fechados = df_orc_f[df_orc_f["Status_Orc"] == "Fechado"]
+        fechados     = df_orc_f[df_orc_f["Status_Orc"] == "Fechado"]
         faturamento += pd.to_numeric(fechados.get("Valor_Total", pd.Series(dtype=float)),
                                      errors="coerce").fillna(0).sum()
         aguardando   = df_orc_f[df_orc_f["Status_Orc"] == "Aguardando"]
@@ -394,22 +370,13 @@ def calcular_curva_abc(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
 
 
 def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
-    """
-    Curva ABC por código de peça (coluna Produto do Senior).
-
-    CORRECAO: A classificacao A/B/C é calculada sobre o UNIVERSO COMPLETO
-    de pecas (Pct_Acum em relacao ao total geral). So depois os top_n sao
-    retornados para exibicao. Assim a curva reflete a real concentracao de
-    faturamento — nao apenas o recorte exibido.
-    """
     _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Pct_Acum", "Curva"]
     if df is None or df.empty:
         return pd.DataFrame(columns=_cols)
 
-    # Mapeia colunas do Senior ERP
-    col_cod   = next((c for c in ["Codigo","Produto","produto","codigo"] if c in df.columns), None)
-    col_valor = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq"] if c in df.columns), None)
-    col_desc  = next((c for c in ["Descricao_Peca","Descricao","descricao"] if c in df.columns), col_cod)
+    col_cod   = next((c for c in ["Codigo", "Produto", "produto", "codigo"] if c in df.columns), None)
+    col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq"] if c in df.columns), None)
+    col_desc  = next((c for c in ["Descricao_Peca", "Descricao", "descricao"] if c in df.columns), col_cod)
 
     if not col_cod or not col_valor:
         return pd.DataFrame(columns=_cols)
@@ -425,32 +392,25 @@ def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataF
     if grp.empty:
         return pd.DataFrame(columns=_cols)
 
-    # Classificacao sobre universo COMPLETO
     total           = grp["Valor_Total"].sum()
     grp["Pct"]      = grp["Valor_Total"] / total * 100
     grp["Pct_Acum"] = grp["Pct"].cumsum()
     grp["Curva"]    = grp["Pct_Acum"].apply(
         lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C")
     )
-
-    # Retorna apenas os top_n para exibicao (curva ja correta)
     return grp.head(top_n).reset_index(drop=True)
 
 
 def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:
-    """Top 10 revendas por faturamento — aceita múltiplos nomes de coluna."""
     if df is None or df.empty:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
-    col_cli = next((c for c in ["Cliente_Revenda","Cliente","cliente","Revenda"] if c in df.columns), None)
-    col_val = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq"] if c in df.columns), None)
+    col_cli = next((c for c in ["Cliente_Revenda", "Cliente", "cliente", "Revenda"] if c in df.columns), None)
+    col_val = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq"] if c in df.columns), None)
     if not col_cli or not col_val:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
     df = df.copy()
     df["Cliente_Revenda"] = df[col_cli].astype(str)
-    df["Valor_Total"] = pd.to_numeric(df[col_val], errors="coerce").fillna(0)
-    if False:  # placeholder para manter estrutura
-        pass
-
+    df["Valor_Total"]     = pd.to_numeric(df[col_val], errors="coerce").fillna(0)
     top = df.groupby("Cliente_Revenda")["Valor_Total"].sum().reset_index()
     top = top[
         top["Cliente_Revenda"].notna() &
@@ -469,40 +429,39 @@ def calcular_abc_por_revenda(
     data_ini_filtro=None,
     data_fim_filtro=None,
 ):
-    import pandas as _pd
     import numpy as _np
 
     if df is None or df.empty:
-        return _pd.DataFrame(), 0, "", ""
+        return pd.DataFrame(), 0, "", ""
 
-    col_cli   = next((c for c in ["Cliente_Revenda","Cliente","cliente"] if c in df.columns), None)
-    col_cod   = next((c for c in ["Codigo","Produto","produto","codigo"] if c in df.columns), None)
-    col_valor = next((c for c in ["Valor_Total","Vlr_Liq_","vlr_liq"] if c in df.columns), None)
-    col_qtd   = next((c for c in ["Quantidade","Qtde_Fat_","qtde_fat"] if c in df.columns), None)
-    col_desc  = next((c for c in ["Descricao_Peca","Descricao"] if c in df.columns), col_cod)
-    col_data  = next((c for c in ["Data_Venda","Emissao","emissao"] if c in df.columns), None)
+    col_cli   = next((c for c in ["Cliente_Revenda", "Cliente", "cliente"] if c in df.columns), None)
+    col_cod   = next((c for c in ["Codigo", "Produto", "produto", "codigo"] if c in df.columns), None)
+    col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq"] if c in df.columns), None)
+    col_qtd   = next((c for c in ["Quantidade", "Qtde_Fat_", "qtde_fat"] if c in df.columns), None)
+    col_desc  = next((c for c in ["Descricao_Peca", "Descricao"] if c in df.columns), col_cod)
+    col_data  = next((c for c in ["Data_Venda", "Emissao", "emissao"] if c in df.columns), None)
 
     if not col_cli or not col_cod or not col_valor:
-        return _pd.DataFrame(), 0, "", ""
+        return pd.DataFrame(), 0, "", ""
 
     df = df.copy()
     df["_cli"]   = df[col_cli].astype(str).str.strip()
     df["_cod"]   = df[col_cod].astype(str).str.strip()
-    df["_valor"] = _pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
-    df["_qtd"]   = _pd.to_numeric(df[col_qtd], errors="coerce").fillna(0) if col_qtd else 0
+    df["_valor"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
+    df["_qtd"]   = pd.to_numeric(df[col_qtd],   errors="coerce").fillna(0) if col_qtd else 0
     df["_desc"]  = df[col_desc].astype(str) if col_desc else df["_cod"]
 
     ini_str = fim_str = "—"
     dias_periodo = 365
 
     if col_data:
-        df["_data"] = _pd.to_datetime(df[col_data], errors="coerce", dayfirst=True)
+        df["_data"] = pd.to_datetime(df[col_data], errors="coerce", dayfirst=True)
         if data_ini_filtro:
             df = df[df["_data"].dt.date >= data_ini_filtro]
         if data_fim_filtro:
             df = df[df["_data"].dt.date <= data_fim_filtro]
         if df.empty:
-            return _pd.DataFrame(), 0, "", ""
+            return pd.DataFrame(), 0, "", ""
         d_ini = df["_data"].min()
         d_fim = df["_data"].max()
         dias_periodo = max((d_fim - d_ini).days, 1)
@@ -543,11 +502,11 @@ def calcular_abc_por_revenda(
         resultados.append(grp)
 
     if not resultados:
-        return _pd.DataFrame(), dias_periodo, ini_str, fim_str
+        return pd.DataFrame(), dias_periodo, ini_str, fim_str
 
-    df_final = _pd.concat(resultados, ignore_index=True)[[
-        "Cliente_Revenda","Codigo","Descricao_Peca",
-        "Valor_Total","Quantidade","Pct","Pct_Acum","Curva",
-        "Media_Diaria","Estoque_Minimo_Sugerido"
+    df_final = pd.concat(resultados, ignore_index=True)[[
+        "Cliente_Revenda", "Codigo", "Descricao_Peca",
+        "Valor_Total", "Quantidade", "Pct", "Pct_Acum", "Curva",
+        "Media_Diaria", "Estoque_Minimo_Sugerido",
     ]]
     return df_final, dias_periodo, ini_str, fim_str

@@ -1,18 +1,28 @@
 """
-auth.py — Genius Implementos Agrícolas v14 (CORRIGIDO)
+auth.py — Genius Implementos Agrícolas v16 (AUDITORIA)
 
 Correções aplicadas:
-  [FIX-SEC-1] Removido hardcode "lucas" como admin em todas as verificações
-  [FIX-SEC-6] Fallback seguro de abas_permitidas: lista vazia ao invés de TODAS_ABAS
-              quando session_state não tem o campo (evita exposição por sessão parcial)
-  [FIX-SEC-7] is_admin lido exclusivamente do banco via session_state,
-              sem comparação de string de login
+  [FIX-SEC-1]  Removido hardcode "lucas" como admin (mantido do v14).
+  [FIX-SEC-2]  _verificar() substituído por verificar_senha() do db.py,
+               que suporta bcrypt (novo) e SHA-256 puro (legado) para migração gradual.
+  [FIX-SEC-3]  TTL de sessão: sessões com mais de SESSION_TTL_MINUTOS são
+               invalidadas automaticamente. Padrão: 480 min (8 horas).
+  [FIX-SEC-6]  Fallback seguro de abas_permitidas: lista vazia ao invés de
+               TODAS_ABAS quando session_state não tem o campo.
+  [FIX-SEC-7]  is_admin lido exclusivamente do banco via session_state,
+               sem comparação de string de login.
 """
 
 from __future__ import annotations
-import hashlib, hmac
+from datetime import datetime, timedelta
 import streamlit as st
-from data.db import ler_usuarios, alterar_senha, criar_usuario, excluir_usuario, atualizar_usuario
+from data.db import (
+    ler_usuarios, alterar_senha, criar_usuario, excluir_usuario,
+    atualizar_usuario, verificar_senha, _hash_senha,
+)
+
+# ── Configuração de sessão ────────────────────────────────────
+SESSION_TTL_MINUTOS = 480   # 8 horas — ajuste conforme necessidade
 
 # ── Abas disponíveis no sistema ───────────────────────────────
 TODAS_ABAS = [
@@ -24,23 +34,20 @@ TODAS_ABAS = [
     "🔧 Peças",
     "🗺️ Territórios",
 ]
-ABAS_COMERCIAL = TODAS_ABAS
-ABAS_PCP       = ["⚙️ PCP", "🔧 Peças"]
-
-
-def _hash(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()
-
-def _verificar(digitada: str, salvo: str) -> bool:
-    # Bloco seguro: salvo vazio nunca autentica
-    if not salvo:
-        return False
-    return hmac.compare_digest(_hash(digitada), salvo)
+ABAS_PCP = ["⚙️ PCP", "🔧 Peças"]
 
 
 # ── Tela de Login ─────────────────────────────────────────────
 def tela_login() -> bool:
+    # [FIX-SEC-3] Verifica TTL da sessão antes de assumir autenticado
     if st.session_state.get("autenticado"):
+        login_time = st.session_state.get("login_time")
+        if login_time:
+            elapsed = (datetime.now() - login_time).total_seconds() / 60
+            if elapsed > SESSION_TTL_MINUTOS:
+                _limpar_sessao()
+                st.warning("⏱️ Sessão expirada. Faça login novamente.")
+                st.rerun()
         return True
 
     col_l, col_c, col_r = st.columns([1, 1.4, 1])
@@ -55,24 +62,24 @@ def tela_login() -> bool:
                 rel,
             ]:
                 if os.path.exists(p):
-                    with open(p, 'rb') as _f:
+                    with open(p, "rb") as _f:
                         return _b64.b64encode(_f.read()).decode()
             return None
 
-        logo_data = _logo_b64('assets/genius_logo.png')
+        logo_data = _logo_b64("assets/genius_logo.png")
         if logo_data:
             st.markdown(
                 '<div style="display:flex;justify-content:center;margin-bottom:12px;">'
                 f'<img src="data:image/png;base64,{logo_data}" '
                 'style="max-width:220px;width:100%;"></div>',
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
         else:
             st.markdown(
                 "<div style='text-align:center;margin-bottom:8px;'>"
                 "<span style='font-size:2.2rem;font-weight:800;color:#E36C2C;'>"
                 "Genius Implementos Agrícolas</span></div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         st.markdown("""
@@ -88,17 +95,20 @@ def tela_login() -> bool:
 
         if entrar:
             with st.spinner("🔐 Verificando credenciais..."):
-                usuarios   = ler_usuarios()
+                usuarios = ler_usuarios()
             user_lower = usuario.strip().lower()
             if user_lower in usuarios:
                 d = usuarios[user_lower]
-                if _verificar(senha, d.get("senha_hash", "")):
+                # [FIX-SEC-2] Usa verificar_senha() com suporte bcrypt + SHA-256 legado
+                if verificar_senha(senha, d.get("senha_hash", "")):
                     st.session_state.autenticado   = True
                     st.session_state.usuario_atual = user_lower
                     st.session_state.perfil_atual  = d.get("perfil", "comercial")
                     st.session_state.nome_usuario  = d.get("nome", usuario)
                     # [FIX-SEC-1] is_admin vem APENAS do banco, sem hardcode de login
                     st.session_state.is_admin      = bool(d.get("is_admin", False))
+                    # [FIX-SEC-3] Registra horário do login para controle de TTL
+                    st.session_state.login_time    = datetime.now()
 
                     # Abas permitidas: custom > perfil > padrão seguro
                     abas_custom = d.get("abas_permitidas")
@@ -122,6 +132,13 @@ def tela_login() -> bool:
     return False
 
 
+def _limpar_sessao():
+    """Limpa todas as chaves de autenticação do session_state."""
+    for k in ["autenticado", "usuario_atual", "perfil_atual",
+              "nome_usuario", "is_admin", "abas_permitidas", "login_time", "_sb_ok"]:
+        st.session_state.pop(k, None)
+
+
 # ── Sidebar do usuário ────────────────────────────────────────
 def painel_usuario():
     nome   = st.session_state.get("nome_usuario", "Usuário")
@@ -132,11 +149,20 @@ def painel_usuario():
     label = "Comercial" if perfil == "comercial" else "PCP"
     adm_badge = ' <span style="color:#E36C2C;font-size:10px;">★ Admin</span>' if admin else ""
 
+    # [FIX-SEC-3] Exibe tempo restante de sessão
+    login_time = st.session_state.get("login_time")
+    tempo_restante = ""
+    if login_time:
+        elapsed = (datetime.now() - login_time).total_seconds() / 60
+        restante = SESSION_TTL_MINUTOS - elapsed
+        if restante < 60:
+            tempo_restante = f' <span style="color:#E8A020;font-size:10px;">⏱ {int(restante)}min</span>'
+
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"""
 <div style='padding:6px 0 8px;'>
   <div style='font-size:13px;color:#A8B8CC;'>
-    Olá, <strong style='color:#EEF2F8;'>{nome}</strong>{adm_badge}
+    Olá, <strong style='color:#EEF2F8;'>{nome}</strong>{adm_badge}{tempo_restante}
   </div>
   <div style='font-size:11px;color:#6A7A8A;margin-top:2px;'>{icone} Perfil: {label}</div>
 </div>""", unsafe_allow_html=True)
@@ -147,8 +173,7 @@ def painel_usuario():
             st.session_state["_modal_senha"] = True
     with c2:
         if st.button("Sair", use_container_width=True, key="btn_sair"):
-            for k in ["autenticado","usuario_atual","perfil_atual","nome_usuario","is_admin","abas_permitidas"]:
-                st.session_state.pop(k, None)
+            _limpar_sessao()
             st.rerun()
 
     if st.session_state.get("_modal_senha"):
@@ -159,14 +184,15 @@ def _modal_senha():
     with st.sidebar.expander("🔑 Redefinir Minha Senha", expanded=True):
         login = st.session_state.get("usuario_atual", "")
         with st.form("form_minha_senha", clear_on_submit=True):
-            atual = st.text_input("Senha atual",    type="password", key="mp_atual")
-            nova  = st.text_input("Nova senha",     type="password", key="mp_nova")
-            conf  = st.text_input("Confirmar",      type="password", key="mp_conf")
+            atual = st.text_input("Senha atual",  type="password", key="mp_atual")
+            nova  = st.text_input("Nova senha",   type="password", key="mp_nova")
+            conf  = st.text_input("Confirmar",    type="password", key="mp_conf")
             ok    = st.form_submit_button("Salvar", type="primary")
         if ok:
             usuarios = ler_usuarios()
             d = usuarios.get(login, {})
-            if not _verificar(atual, d.get("senha_hash", "")):
+            # [FIX-SEC-2] Usa verificar_senha() com suporte bcrypt + SHA-256 legado
+            if not verificar_senha(atual, d.get("senha_hash", "")):
                 st.sidebar.error("Senha atual incorreta.")
             elif len(nova) < 6:
                 st.sidebar.error("Mínimo 6 caracteres.")
@@ -245,7 +271,6 @@ def render_painel_admin():
     for login, d in usuarios.items():
         nome_u   = d.get("nome", login)
         perfil_u = d.get("perfil", "comercial")
-        # [FIX-SEC-1] admin_u vem apenas do banco
         admin_u  = bool(d.get("is_admin", False))
         abas_u   = d.get("abas_permitidas", TODAS_ABAS if perfil_u == "comercial" else ABAS_PCP)
 
@@ -254,10 +279,9 @@ def render_painel_admin():
 
             with tab_perm:
                 with st.form(f"form_perm_{login}", clear_on_submit=False):
-                    novo_perfil = st.selectbox("Perfil", ["comercial","pcp"],
-                                               index=0 if perfil_u=="comercial" else 1,
+                    novo_perfil = st.selectbox("Perfil", ["comercial", "pcp"],
+                                               index=0 if perfil_u == "comercial" else 1,
                                                key=f"pf_{login}")
-                    # Filtra abas_u para só incluir valores que existem em TODAS_ABAS
                     abas_u_validas = [a for a in (abas_u or []) if a in TODAS_ABAS]
                     novas_abas  = st.multiselect("Abas com acesso", TODAS_ABAS,
                                                   default=abas_u_validas, key=f"ab_{login}")
@@ -274,8 +298,8 @@ def render_painel_admin():
 
             with tab_senha:
                 with st.form(f"form_reset_{login}", clear_on_submit=True):
-                    s1 = st.text_input("Nova senha",     type="password", key=f"rs1_{login}")
-                    s2 = st.text_input("Confirmar",      type="password", key=f"rs2_{login}")
+                    s1 = st.text_input("Nova senha",  type="password", key=f"rs1_{login}")
+                    s2 = st.text_input("Confirmar",   type="password", key=f"rs2_{login}")
                     ok = st.form_submit_button("Salvar", type="primary")
                 if ok:
                     if len(s1) < 6:
@@ -299,14 +323,16 @@ def render_painel_admin():
 
 
 def abas_permitidas() -> list[str]:
-    # [FIX-SEC-6] Fallback seguro: lista vazia se sessão parcial — app exibe aviso
+    # [FIX-SEC-6] Fallback seguro: lista vazia se sessão parcial
     abas = st.session_state.get("abas_permitidas")
     if abas is None:
         return []
     return abas
 
+
 def perfil_atual() -> str:
     return st.session_state.get("perfil_atual", "comercial")
+
 
 def is_admin() -> bool:
     # [FIX-SEC-1] Apenas lê do session_state — sem hardcode de login

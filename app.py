@@ -1,16 +1,13 @@
 """
-app.py — Genius Implementos Agrícolas v15
+app.py — Genius Implementos Agrícolas v16 (AUDITORIA)
 
-Alterações aplicadas:
-  [WHITE-1]  CSS whitelabel injeta no boot: oculta MainMenu, footer, header,
-             DeployButton e stToolbar.
-  [FIX-DATE] Filtro de data agora é totalmente livre — sem travar nas datas
-             mínima/máxima do DataFrame. Usa today() como default do range
-             superior quando df estiver vazio.
-  [DB-MIGR]  Após upload da planilha Senior, dispara
-             importar_pecas_senior_para_supabase(df) antes de exibir dados.
-  [EST-MIN]  Nova sub-aba "📐 Estoque Mínimo por Revenda" baseada em
-             Pandas puro — sem IA, matemática determinística.
+Correções aplicadas:
+  [FIX-APP-1]  Adicionada função _render_abc_por_revenda() que estava sendo chamada
+               mas nunca definida — causava NameError em produção.
+  [FIX-WHITE-1] CSS whitelabel mantido.
+  [FIX-DATE]   Filtro de data totalmente livre sem travar nas datas mínima/máxima do df.
+  [DB-MIGR]    Importação para Supabase com progress bar (via db.py v16).
+  [EST-MIN]    Sub-aba Estoque Mínimo mantida.
 """
 
 import streamlit as st
@@ -21,6 +18,7 @@ from auth import tela_login, painel_usuario, render_painel_admin, is_admin, abas
 from data.loader import (
     preparar_pecas, calcular_kpis_pecas,
     calcular_curva_abc_por_codigo, calcular_top10_revendas,
+    calcular_abc_por_revenda,
 )
 from components.ui import (
     render_header, render_sidebar_uploads,
@@ -57,26 +55,15 @@ st.set_page_config(
 )
 
 # ══════════════════════════════════════════════════════════════
-# [WHITE-1]  CSS WHITELABEL — oculta todos os elementos nativos
+# CSS WHITELABEL
 # ══════════════════════════════════════════════════════════════
 _WHITELABEL_CSS = """
 <style>
-  /* Menu hambúrguer */
   #MainMenu { visibility: hidden !important; display: none !important; }
-
-  /* Footer "Made with Streamlit" */
   footer { visibility: hidden !important; display: none !important; }
-
-  /* Header topo (manage app, star, share) */
   header[data-testid="stHeader"] { display: none !important; }
-
-  /* Botão Deploy (nuvem) */
   .stDeployButton { display: none !important; }
-
-  /* Toolbar de ferramentas (Rerun, Settings…) */
   [data-testid="stToolbar"] { display: none !important; }
-
-  /* Padding extra que o header removia */
   .block-container { padding-top: 1.5rem !important; }
 </style>
 """
@@ -96,17 +83,14 @@ _peca_file, _catalogo_file = render_sidebar_uploads()
 
 # ══════════════════════════════════════════════════════════════
 # 3. Dados de Peças
-#    [DB-MIGR] Se o usuário fez upload, importa para o Supabase
-#              antes de preparar o df em memória.
 # ══════════════════════════════════════════════════════════════
-# ── Importa catálogo de descrições ───────────────────────────
 if _catalogo_file is not None and not st.session_state.get("_catalogo_importado"):
     with st.spinner("📚 Importando catálogo de peças..."):
         try:
             import pandas as _pd_cat
             df_cat = _pd_cat.read_excel(_catalogo_file, header=4)
-            df_cat = df_cat[["CÓDIGO","DESCRIÇÃO"]].dropna(subset=["CÓDIGO","DESCRIÇÃO"])
-            df_cat.columns = ["Codigo","Descricao"]
+            df_cat = df_cat[["CÓDIGO", "DESCRIÇÃO"]].dropna(subset=["CÓDIGO", "DESCRIÇÃO"])
+            df_cat.columns = ["Codigo", "Descricao"]
             df_cat["Codigo"] = df_cat["Codigo"].astype(str).str.strip()
             df_cat = df_cat[df_cat["Codigo"].str.match(r"^\d+$")]
             n_cat, msg_cat = importar_catalogo_pecas(df_cat)
@@ -120,7 +104,6 @@ if _catalogo_file is not None and not st.session_state.get("_catalogo_importado"
 
 if _peca_file is not None and not st.session_state.get("_pecas_importadas"):
     with st.spinner("⬆️ Carregando planilha e importando para o banco..."):
-        # preparar_pecas já faz o parse; pegamos o df bruto para upsert
         df_raw, _ = preparar_pecas(_peca_file)
         if not df_raw.empty:
             n_ok, msg_imp = importar_pecas_senior_para_supabase(df_raw)
@@ -132,11 +115,11 @@ if _peca_file is not None and not st.session_state.get("_pecas_importadas"):
 
 df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
 
-# ── Enriquece df_pecas com descrições do catálogo ─────────────
+# Enriquece df_pecas com descrições do catálogo
 if not df_pecas.empty and not is_mock_pecas:
     df_cat_desc = ler_catalogo_pecas()
     if not df_cat_desc.empty:
-        col_cod = next((c for c in ["Codigo","Produto","produto"] if c in df_pecas.columns), None)
+        col_cod = next((c for c in ["Codigo", "Produto", "produto"] if c in df_pecas.columns), None)
         if col_cod:
             df_pecas = df_pecas.copy()
             df_pecas["_cod_str"] = df_pecas[col_cod].astype(str).str.strip()
@@ -157,7 +140,6 @@ render_auto_refresh()
 # ══════════════════════════════════════════════════════════════
 
 def _filtrar_pecas_por_perfil(df: pd.DataFrame, perfil: str) -> pd.DataFrame:
-    """Remove colunas financeiras para perfil PCP."""
     if perfil == "pcp":
         cols_remover = [c for c in ["Valor_Unitario", "Valor_Total"] if c in df.columns]
         if cols_remover:
@@ -167,22 +149,8 @@ def _filtrar_pecas_por_perfil(df: pd.DataFrame, perfil: str) -> pd.DataFrame:
 
 def _calcular_estoque_minimo(df: pd.DataFrame, lead_time_dias: int = 15) -> pd.DataFrame:
     """
-    [EST-MIN] Calcula estoque mínimo por (Peça × Revenda) usando Pandas puro.
-
-    Fórmula:
-        estoque_minimo = media_vendas_diarias × lead_time_dias
-
-    Onde:
-        media_vendas_diarias = total_qty_no_periodo / dias_no_periodo
-
-    Colunas esperadas no df:
-        Data_Venda  (datetime), Codigo_Peca (str), Descricao (str),
-        Revenda (str), Quantidade (numeric), Estoque_Atual (numeric, opcional)
-
-    Retorna DataFrame com colunas:
-        Codigo_Peca, Descricao, Revenda,
-        Total_Vendido, Media_Diaria, Estoque_Minimo_Sugerido,
-        Estoque_Atual, Abaixo_Minimo (bool)
+    Calcula estoque mínimo por (Peça × Revenda) usando Pandas puro.
+    Fórmula: estoque_minimo = media_vendas_diarias × lead_time_dias
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -199,12 +167,10 @@ def _calcular_estoque_minimo(df: pd.DataFrame, lead_time_dias: int = 15) -> pd.D
     if df.empty:
         return pd.DataFrame()
 
-    # Período do histórico disponível
     data_ini = df["Data_Venda"].min()
     data_fim = df["Data_Venda"].max()
     dias_periodo = max((data_fim - data_ini).days, 1)
 
-    # Agrupamento por Peça + Revenda
     grp = (
         df.groupby(["Codigo_Peca", "Revenda"], as_index=False)
         .agg(
@@ -213,10 +179,9 @@ def _calcular_estoque_minimo(df: pd.DataFrame, lead_time_dias: int = 15) -> pd.D
         )
     )
 
-    grp["Media_Diaria"]           = grp["Total_Vendido"] / dias_periodo
+    grp["Media_Diaria"]            = grp["Total_Vendido"] / dias_periodo
     grp["Estoque_Minimo_Sugerido"] = (grp["Media_Diaria"] * lead_time_dias).round(1)
 
-    # Estoque atual — coluna opcional; se não existir, assume 0
     if "Estoque_Atual" in df.columns:
         est_atual = (
             df.groupby(["Codigo_Peca", "Revenda"])["Estoque_Atual"]
@@ -229,14 +194,112 @@ def _calcular_estoque_minimo(df: pd.DataFrame, lead_time_dias: int = 15) -> pd.D
         grp["Estoque_Atual"] = 0.0
 
     grp["Abaixo_Minimo"] = grp["Estoque_Atual"] < grp["Estoque_Minimo_Sugerido"]
-
-    # Ordena: abaixo do mínimo primeiro, depois maior venda
     grp = grp.sort_values(
         ["Abaixo_Minimo", "Total_Vendido"],
         ascending=[False, False],
     ).reset_index(drop=True)
 
     return grp
+
+
+# ══════════════════════════════════════════════════════════════
+# [FIX-APP-1]  _render_abc_por_revenda — função que estava FALTANDO
+#              Causa original: NameError ao abrir a aba Peças
+# ══════════════════════════════════════════════════════════════
+
+def _render_abc_por_revenda(df: pd.DataFrame):
+    """
+    Renderiza análise ABC por revenda com estoque mínimo sugerido.
+    Chamada no final de _render_aba_pecas() para o perfil comercial.
+    """
+    st.subheader("📊 ABC por Revenda — Estoque Mínimo Sugerido")
+
+    col_lt, col_top, col_btn = st.columns([2, 2, 1])
+    with col_lt:
+        lead_time = st.number_input(
+            "Lead Time (dias)", min_value=1, max_value=90, value=15, step=1,
+            key="abc_rev_lead", help="Dias para reposição de estoque.",
+        )
+    with col_top:
+        top_n = st.number_input(
+            "Top N revendas", min_value=1, max_value=50, value=10, step=1,
+            key="abc_rev_topn",
+        )
+    with col_btn:
+        st.write("")
+        calcular = st.button("⚙️ Calcular", key="btn_abc_rev", type="primary")
+
+    if not calcular and "df_abc_rev_cache" not in st.session_state:
+        st.info("Clique em **Calcular** para gerar o ABC por revenda.")
+        return
+
+    if calcular or "df_abc_rev_cache" not in st.session_state:
+        with st.spinner("Calculando ABC por revenda..."):
+            df_result, dias, ini_str, fim_str = calcular_abc_por_revenda(
+                df,
+                top_n_revendas=int(top_n),
+                lead_time_dias=int(lead_time),
+            )
+            st.session_state["df_abc_rev_cache"] = df_result
+            st.session_state["df_abc_rev_meta"]  = (dias, ini_str, fim_str)
+
+    df_result = st.session_state.get("df_abc_rev_cache", pd.DataFrame())
+    dias, ini_str, fim_str = st.session_state.get("df_abc_rev_meta", (0, "—", "—"))
+
+    if df_result is None or df_result.empty:
+        st.warning("⚠️ Sem dados suficientes para calcular. Verifique se há peças carregadas.")
+        return
+
+    st.caption(f"Período: {ini_str} → {fim_str}  |  {dias} dias  |  Lead time: {int(lead_time)} dias")
+
+    # Filtro por revenda
+    revendas_disponiveis = sorted(df_result["Cliente_Revenda"].unique().tolist())
+    rev_sel = st.selectbox(
+        "Filtrar por revenda", ["Todas"] + revendas_disponiveis,
+        key="abc_rev_sel",
+    )
+    df_show = df_result if rev_sel == "Todas" else df_result[df_result["Cliente_Revenda"] == rev_sel]
+
+    # Métricas rápidas
+    k1, k2, k3 = st.columns(3)
+    k1.metric("📦 Combinações", f"{len(df_show):,}".replace(",", "."))
+    k2.metric("🟠 Classe A",    f"{(df_show['Curva'] == 'A').sum():,}".replace(",", "."))
+    k3.metric("⚡ Sem cobertura",
+              f"{(df_show['Estoque_Minimo_Sugerido'] == 0).sum():,}".replace(",", "."))
+
+    def _brl(v):
+        try:
+            return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            return "—"
+
+    # Tabela
+    cols_show = [c for c in [
+        "Cliente_Revenda", "Codigo", "Descricao_Peca",
+        "Valor_Total", "Quantidade", "Curva",
+        "Media_Diaria", "Estoque_Minimo_Sugerido",
+    ] if c in df_show.columns]
+
+    st.dataframe(
+        df_show[cols_show].style.format({
+            "Valor_Total":             "{:,.2f}",
+            "Quantidade":              "{:,.0f}",
+            "Media_Diaria":            "{:.3f}",
+            "Estoque_Minimo_Sugerido": "{:.1f}",
+        }),
+        use_container_width=True,
+        height=500,
+    )
+
+    # Download
+    csv_bytes = df_show[cols_show].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+    st.download_button(
+        "📥 Exportar ABC por Revenda (.csv)",
+        data=csv_bytes,
+        file_name=f"abc_por_revenda_lead{int(lead_time)}d.csv",
+        mime="text/csv",
+        key="dl_abc_rev",
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -252,16 +315,15 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     st.header("🔧 Análise de Peças")
 
-    # ── [FIX-DATE] Filtro de Período Dinâmico ─────────────────
-    # Não trava nas datas do df: usuário pode escolher livremente.
+    # Filtro de Período Dinâmico
     hoje = date.today()
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
     default_ini = date(2020, 1, 1)
     default_fim = hoje
     with col_f1:
-        d0 = st.date_input("De", value=default_ini, format="DD/MM/YYYY", key="peca_d0")
+        d0 = st.date_input("De",   value=default_ini, format="DD/MM/YYYY", key="peca_d0")
     with col_f2:
-        d1 = st.date_input("Até", value=default_fim, format="DD/MM/YYYY", key="peca_d1")
+        d1 = st.date_input("Até",  value=default_fim, format="DD/MM/YYYY", key="peca_d1")
     with col_f3:
         st.write("")
         st.write("")
@@ -278,23 +340,16 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
 
     df_para_calculos = _filtrar_pecas_por_perfil(df_filtrado, perfil)
 
-    # ── Orçamentos ─────────────────────────────────────────────
+    # Orçamentos
     df_orc = ler_orcamentos()
-    orc_faturados = 0.0
+    orc_faturados  = 0.0
     orc_aguardando = 0.0
     if not df_orc.empty and "Status_Orc" in df_orc.columns:
-        orc_faturados  = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"]=="Faturado",  "Valor_Total"], errors="coerce").fillna(0).sum()
-        orc_aguardando = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"]=="Aguardando","Valor_Total"], errors="coerce").fillna(0).sum()
-    pecas_em_orc = 0.0
-    if not df_orc.empty and "Status_Orc" in df_orc.columns:
-        mask = df_orc["Status_Orc"].isin(["Aguardando"])
-        pecas_em_orc = pd.to_numeric(
-            df_orc.loc[mask, "Valor_Total"], errors="coerce"
-        ).fillna(0).sum()
+        orc_faturados  = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"] == "Faturado",  "Valor_Total"], errors="coerce").fillna(0).sum()
+        orc_aguardando = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"] == "Aguardando","Valor_Total"], errors="coerce").fillna(0).sum()
 
-    # ── KPIs ───────────────────────────────────────────────────
+    # KPIs
     if perfil == "comercial":
-        # df_orc sem filtro de período — orçamentos lançados hoje sempre somam
         kpis = calcular_kpis_pecas(df_filtrado, df_orc)
     else:
         kpis = calcular_kpis_pecas(df_para_calculos)
@@ -332,40 +387,36 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         with c2: _card("🏷️ SKUs Ativos",     str(kpis["qtd_skus"]))
         st.divider()
 
-    # ── Curva ABC — inclui orçamentos manuais Faturados ──────
-    # Monta df extra dos orçamentos para enriquecer a curva e o top10
-    # Orçamentos faturados para ABC
+    # Curva ABC
     df_orc_para_abc = pd.DataFrame()
     if not df_orc.empty and "Status_Orc" in df_orc.columns:
         df_fat_orc = df_orc[df_orc["Status_Orc"] == "Faturado"].copy()
         if not df_fat_orc.empty:
             df_orc_para_abc = pd.DataFrame({
-                "Codigo":          df_fat_orc.get("Nr_Pedido", pd.Series(dtype=str)),
-                "Descricao_Peca":  df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
+                "Codigo":          df_fat_orc.get("Nr_Pedido",        pd.Series(dtype=str)),
+                "Descricao_Peca":  df_fat_orc.get("Cliente_Revenda",  pd.Series(dtype=str)),
                 "Valor_Total":     pd.to_numeric(df_fat_orc.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0),
-                "Cliente_Revenda": df_fat_orc.get("Cliente_Revenda", pd.Series(dtype=str)),
+                "Cliente_Revenda": df_fat_orc.get("Cliente_Revenda",  pd.Series(dtype=str)),
             })
 
-    # Lançamentos manuais de peças (itens individuais com código)
     df_lanc = ler_lancamentos_pecas()
     df_lanc_para_abc = pd.DataFrame()
     if not df_lanc.empty:
-        df_lanc_fat = df_lanc[df_lanc.get("Status_Lanc", pd.Series(dtype=str)) == "Faturado"] if "Status_Lanc" in df_lanc.columns else df_lanc
+        df_lanc_fat = df_lanc[df_lanc["Status_Lanc"] == "Faturado"] if "Status_Lanc" in df_lanc.columns else df_lanc
         if not df_lanc_fat.empty:
             df_lanc_para_abc = pd.DataFrame({
-                "Codigo":          df_lanc_fat.get("Codigo", pd.Series(dtype=str)).astype(str),
-                "Descricao_Peca":  df_lanc_fat.get("Descricao", pd.Series(dtype=str)),
-                "Valor_Total":     pd.to_numeric(df_lanc_fat.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0),
+                "Codigo":          df_lanc_fat.get("Codigo",          pd.Series(dtype=str)).astype(str),
+                "Descricao_Peca":  df_lanc_fat.get("Descricao",       pd.Series(dtype=str)),
+                "Valor_Total":     pd.to_numeric(df_lanc_fat.get("Valor_Total",  pd.Series(dtype=float)), errors="coerce").fillna(0),
                 "Cliente_Revenda": df_lanc_fat.get("Cliente_Revenda", pd.Series(dtype=str)),
-                "Quantidade":      pd.to_numeric(df_lanc_fat.get("Quantidade", pd.Series(dtype=float)), errors="coerce").fillna(0),
+                "Quantidade":      pd.to_numeric(df_lanc_fat.get("Quantidade",   pd.Series(dtype=float)), errors="coerce").fillna(0),
             })
 
     df_para_calculos_enriquecido = pd.concat(
         [df_para_calculos, df_orc_para_abc, df_lanc_para_abc],
-        ignore_index=True
+        ignore_index=True,
     )
-    df_abc = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=20)
-    # df_completo para pie chart calcular distribuição A/B/C real
+    df_abc          = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=20)
     df_abc_completo = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=99999)
 
     if perfil == "comercial":
@@ -374,8 +425,7 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
             st.subheader("📊 Curva ABC – Peças Mais Vendidas")
             if not df_abc_completo.empty:
                 st.plotly_chart(grafico_curva_abc(df_abc_completo), use_container_width=True)
-                # Top 15 por cada classe A, B, C
-                for _classe, _emoji, _cor in [("A","🟠","#E67E22"),("B","🟢","#3D9970"),("C","🔵","#2A5A8A")]:
+                for _classe, _emoji in [("A", "🟠"), ("B", "🟢"), ("C", "🔵")]:
                     _df_classe = df_abc_completo[df_abc_completo["Curva"] == _classe] if "Curva" in df_abc_completo.columns else pd.DataFrame()
                     if not _df_classe.empty:
                         st.markdown(f"##### {_emoji} Top 15 Produtos — Classe {_classe}")
@@ -384,21 +434,17 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
                 st.info("Sem dados para Curva ABC.")
         with col_rev:
             st.subheader("🏆 Top 10 Revendas")
-            # Combina planilha Senior + orçamentos manuais Faturados
             df_orc_fat = pd.DataFrame()
             if not df_orc.empty and "Status_Orc" in df_orc.columns:
-                df_orc_fat = df_orc[df_orc["Status_Orc"] == "Faturado"][["Cliente_Revenda","Valor_Total"]].copy()
+                df_orc_fat = df_orc[df_orc["Status_Orc"] == "Faturado"][["Cliente_Revenda", "Valor_Total"]].copy()
                 df_orc_fat["Valor_Total"] = pd.to_numeric(df_orc_fat["Valor_Total"], errors="coerce").fillna(0)
             df_para_top10 = pd.concat([
-                df_filtrado[["Cliente_Revenda","Valor_Total"]] if not df_filtrado.empty else pd.DataFrame(),
+                df_filtrado[["Cliente_Revenda", "Valor_Total"]] if not df_filtrado.empty else pd.DataFrame(),
                 df_orc_fat,
             ], ignore_index=True) if not df_orc_fat.empty else df_filtrado
             df_top10 = calcular_top10_revendas(df_para_top10)
             if not df_top10.empty:
-                st.plotly_chart(
-                    grafico_ranking_revendas_pecas(df_top10, top_n=10),
-                    use_container_width=True,
-                )
+                st.plotly_chart(grafico_ranking_revendas_pecas(df_top10, top_n=10), use_container_width=True)
             else:
                 st.info("Sem dados de revendas.")
     else:
@@ -411,19 +457,19 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         if not df_orc.empty and "Status_Orc" in df_orc.columns:
             st.divider()
             st.subheader("📋 Orçamentos de Peças em Aberto")
-            df_orc_view = df_orc[df_orc["Status_Orc"] == "Aguardando"][
-                ["Nr_Pedido", "Data_Orcamento", "Cliente_Revenda", "Valor_Total", "Status_Orc"]
-            ]
+            df_orc_view = df_orc[df_orc["Status_Orc"] == "Aguardando"][[
+                "Nr_Pedido", "Data_Orcamento", "Cliente_Revenda", "Valor_Total", "Status_Orc"
+            ]]
             st.dataframe(df_orc_view, use_container_width=True, height=300)
 
     if perfil == "comercial":
         st.divider()
-
+        # [FIX-APP-1] Função agora definida — sem mais NameError
         _render_abc_por_revenda(df_filtrado)
 
 
 # ══════════════════════════════════════════════════════════════
-# [EST-MIN]  Sub-aba: Estoque Mínimo por Revenda
+# Sub-aba: Estoque Mínimo por Revenda
 # ══════════════════════════════════════════════════════════════
 
 def _render_estoque_minimo(df: pd.DataFrame):
@@ -460,7 +506,7 @@ def _render_estoque_minimo(df: pd.DataFrame):
     with st.spinner("Calculando estoque mínimo..."):
         df_estmin = _calcular_estoque_minimo(df, lead_time_dias=int(lead_time))
         st.session_state["df_estmin_cache"] = df_estmin
-    
+
     df_estmin = st.session_state.get("df_estmin_cache", pd.DataFrame())
 
     if df_estmin.empty:
@@ -468,10 +514,9 @@ def _render_estoque_minimo(df: pd.DataFrame):
                    "`Data_Venda`, `Codigo_Peca`, `Quantidade`, `Revenda`.")
         return
 
-    # ── KPIs rápidos ───────────────────────────────────────────
-    total_itens   = len(df_estmin)
-    abaixo_count  = int(df_estmin["Abaixo_Minimo"].sum())
-    pct_critico   = (abaixo_count / total_itens * 100) if total_itens else 0
+    total_itens  = len(df_estmin)
+    abaixo_count = int(df_estmin["Abaixo_Minimo"].sum())
+    pct_critico  = (abaixo_count / total_itens * 100) if total_itens else 0
 
     k1, k2, k3 = st.columns(3)
     k1.metric("📦 Combinações Peça × Revenda", f"{total_itens:,}".replace(",", "."))
@@ -480,7 +525,6 @@ def _render_estoque_minimo(df: pd.DataFrame):
 
     st.divider()
 
-    # ── Filtros de exibição ────────────────────────────────────
     col_f1, col_f2 = st.columns([3, 1])
     with col_f1:
         busca = st.text_input("🔍 Filtrar por peça ou revenda", key="est_min_busca",
@@ -498,8 +542,6 @@ def _render_estoque_minimo(df: pd.DataFrame):
         )
         df_show = df_show[mask]
 
-    # ── Tabela estilizada ──────────────────────────────────────
-    # Highlight vermelho em linhas abaixo do mínimo
     def _highlight_critico(row):
         cor = "background-color: rgba(232,64,64,.18); color: #E87878;" if row["Abaixo_Minimo"] else ""
         return [cor] * len(row)
@@ -529,7 +571,6 @@ def _render_estoque_minimo(df: pd.DataFrame):
         f"Fórmula: Estoque Mín. = Média Diária × {int(lead_time)}"
     )
 
-    # ── Download CSV ───────────────────────────────────────────
     csv_bytes = df_show[cols_exibir].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
     st.download_button(
         "📥 Exportar tabela (.csv)",
@@ -556,14 +597,13 @@ MAPA = {
 
 permitidas = abas_permitidas()
 
-# Sessão parcial: se autenticado mas sem abas, força novo login
 if not permitidas and st.session_state.get("autenticado"):
     st.warning(
         "⚠️ Sessão expirada ou permissões não carregadas. "
         "Por favor, faça login novamente."
     )
     for k in ["autenticado", "usuario_atual", "perfil_atual",
-              "nome_usuario", "is_admin", "abas_permitidas"]:
+              "nome_usuario", "is_admin", "abas_permitidas", "login_time", "_sb_ok"]:
         st.session_state.pop(k, None)
     st.rerun()
 

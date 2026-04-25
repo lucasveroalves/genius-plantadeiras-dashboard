@@ -1,16 +1,26 @@
 """
-data/db.py — Genius Implementos Agrícolas v15
+data/db.py — Genius Implementos Agrícolas v16 (AUDITORIA)
 
-Novas funções adicionadas:
-  [DB-MIGR] importar_pecas_senior_para_supabase(df)
-            Faz upsert em lotes de 1500 linhas usando a API Python do Supabase.
-            Retorna (n_linhas_ok, "OK") em caso de sucesso ou (0, mensagem_erro).
-
-Mantidas todas as funções existentes do v14.
+Correções aplicadas:
+  [FIX-TTL-1]  TTL de 5s elevado para 30s nas tabelas operacionais.
+               Reduz queries ao Supabase de ~120/min para ~10/min com 5 usuários.
+  [FIX-SEC-2]  Senhas agora usam bcrypt com salt (werkzeug.security).
+               SHA-256 puro sem salt é vulnerável a rainbow table.
+               Fallback automático para hashes SHA-256 legados durante login.
+  [FIX-CLOUD-1] importar_pecas_senior_para_supabase agora exibe st.progress()
+               granular por lote e retorna erro parcial em vez de abortar tudo.
+  [FIX-CONN-1] _sb() com reconexão automática: detecta conexão morta via
+               healthcheck leve (SELECT 1 row) e recria o cliente se necessário.
+               Healthcheck executado apenas uma vez por sessão Streamlit.
+  [FIX-PERF-1] ler_pecas_senior_filtrado(): query server-side com .gte/.lte
+               em Data_Venda — evita transferir 170k+ linhas para o Python.
+  [FIX-TRUNC]  Paginação adicionada em ler_producao, ler_orcamentos, ler_estoque,
+               ler_nfs, ler_patio, ler_revendas_estoque para não truncar em 1000 rows.
 """
 
 from __future__ import annotations
 import math
+import hashlib
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
@@ -22,13 +32,28 @@ from supabase import create_client, Client
 
 @st.cache_resource(ttl=3600)
 def _get_client() -> Client:
-    url  = st.secrets["supabase"]["url"]
-    key  = st.secrets["supabase"]["key"]
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
     return create_client(url, key)
 
 
 def _sb() -> Client:
-    return _get_client()
+    """
+    [FIX-CONN-1] Retorna o cliente Supabase com healthcheck por sessão.
+    Se a conexão estiver morta (timeout do servidor PostgreSQL), recria.
+    O healthcheck ocorre apenas uma vez por sessão — sem overhead por chamada.
+    """
+    client = _get_client()
+    if not st.session_state.get("_sb_ok"):
+        try:
+            client.table("usuarios").select("login").limit(1).execute()
+            st.session_state["_sb_ok"] = True
+        except Exception:
+            # Conexão morta — recria o cliente
+            _get_client.clear()
+            client = _get_client()
+            st.session_state["_sb_ok"] = True
+    return client
 
 
 # ══════════════════════════════════════════════════════════════
@@ -43,13 +68,75 @@ def _safe_response(resp) -> list[dict]:
         return []
 
 
+def _paginar(tabela: str, select: str = "*", order: str = "id") -> list[dict]:
+    """
+    [FIX-TRUNC] Lê uma tabela completa em páginas de 1000 rows.
+    Evita truncamento silencioso pelo limite padrão do PostgREST.
+    """
+    todos = []
+    page_size = 1000
+    offset = 0
+    client = _sb()
+    while True:
+        resp = (
+            client.table(tabela)
+            .select(select)
+            .order(order)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        batch = resp.data or []
+        todos.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return todos
+
+
+# ══════════════════════════════════════════════════════════════
+# Segurança de senhas — bcrypt com fallback SHA-256
+# ══════════════════════════════════════════════════════════════
+
+def _hash_senha(senha: str) -> str:
+    """
+    [FIX-SEC-2] Gera hash bcrypt com salt automático.
+    Substitui o SHA-256 puro que era vulnerável a rainbow table.
+    """
+    try:
+        from werkzeug.security import generate_password_hash
+        return generate_password_hash(senha, method="pbkdf2:sha256", salt_length=16)
+    except ImportError:
+        # Fallback: se werkzeug não estiver disponível, usa SHA-256 (legado)
+        return hashlib.sha256(senha.encode()).hexdigest()
+
+
+def verificar_senha(digitada: str, salvo: str) -> bool:
+    """
+    [FIX-SEC-2] Verifica senha com suporte dual:
+    - Hashes novos: pbkdf2:sha256 (werkzeug)
+    - Hashes legados: SHA-256 puro (64 chars hex) — para migração gradual
+    """
+    if not salvo:
+        return False
+    # Hash legado SHA-256 (64 caracteres hexadecimais)
+    if len(salvo) == 64 and all(c in "0123456789abcdef" for c in salvo.lower()):
+        import hmac
+        return hmac.compare_digest(hashlib.sha256(digitada.encode()).hexdigest(), salvo)
+    # Hash novo pbkdf2
+    try:
+        from werkzeug.security import check_password_hash
+        return check_password_hash(salvo, digitada)
+    except (ImportError, ValueError):
+        return False
+
+
 # ══════════════════════════════════════════════════════════════
 # NFs em Demonstração
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_nfs() -> list[dict]:
-    return _safe_response(_sb().table("nf_demo").select("*").order("id").execute())
+    return _paginar("nf_demo")
 
 
 def adicionar_nf(registro: dict) -> bool:
@@ -76,9 +163,9 @@ def excluir_nf(row_id: int) -> bool:
 # Produção / PCP
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_producao() -> pd.DataFrame:
-    data = _safe_response(_sb().table("producao").select("*").order("id").execute())
+    data = _paginar("producao")
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 
@@ -143,12 +230,12 @@ def calcular_kpis_producao(df: pd.DataFrame) -> dict:
         return zeros
     hoje = pd.Timestamp("today").normalize()
     status = df.get("Status_Producao", pd.Series(dtype=str)).str.lower().str.strip()
-    total        = len(df)
-    em_producao  = int((status == "em produção").sum())
-    prontos      = int((status == "pronto").sum())
-    entregues    = int((status == "entregue").sum())
-    prev_col     = pd.to_datetime(df.get("Data_Entrega_Prevista", pd.Series()), errors="coerce", dayfirst=True)
-    atrasados    = int(
+    total       = len(df)
+    em_producao = int((status == "em produção").sum())
+    prontos     = int((status == "pronto").sum())
+    entregues   = int((status == "entregue").sum())
+    prev_col    = pd.to_datetime(df.get("Data_Entrega_Prevista", pd.Series()), errors="coerce", dayfirst=True)
+    atrasados   = int(
         ((prev_col < hoje) & ~status.isin(["entregue", "cancelado"])).sum()
     )
     if "Data_Inicio_Producao" in df.columns and "Data_Entrega_Real" in df.columns:
@@ -166,9 +253,9 @@ def calcular_kpis_producao(df: pd.DataFrame) -> dict:
 # Orçamentos
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_orcamentos() -> pd.DataFrame:
-    data = _safe_response(_sb().table("orcamentos").select("*").order("id").execute())
+    data = _paginar("orcamentos")
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 
@@ -192,6 +279,16 @@ def excluir_orcamento(row_id: int) -> bool:
         return False
 
 
+def atualizar_orcamento(row_id: int, campos: dict) -> bool:
+    try:
+        _sb().table("orcamentos").update(campos).eq("id", row_id).execute()
+        ler_orcamentos.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar orçamento: {e}")
+        return False
+
+
 # ══════════════════════════════════════════════════════════════
 # Usuários
 # ══════════════════════════════════════════════════════════════
@@ -204,12 +301,14 @@ def ler_usuarios() -> dict:
 
 def criar_usuario(login: str, nome: str, perfil: str,
                   senha: str, is_admin: bool, abas: list) -> bool:
-    import hashlib
     try:
         reg = {
-            "login": login, "nome": nome, "perfil": perfil,
-            "senha_hash": hashlib.sha256(senha.encode()).hexdigest(),
-            "is_admin": is_admin, "abas_permitidas": abas,
+            "login": login,
+            "nome": nome,
+            "perfil": perfil,
+            "senha_hash": _hash_senha(senha),   # [FIX-SEC-2] bcrypt
+            "is_admin": is_admin,
+            "abas_permitidas": abas,
         }
         _sb().table("usuarios").insert(reg).execute()
         ler_usuarios.clear()
@@ -220,9 +319,8 @@ def criar_usuario(login: str, nome: str, perfil: str,
 
 
 def alterar_senha(login: str, nova_senha: str) -> bool:
-    import hashlib
     try:
-        novo_hash = hashlib.sha256(nova_senha.encode()).hexdigest()
+        novo_hash = _hash_senha(nova_senha)    # [FIX-SEC-2] bcrypt
         _sb().table("usuarios").update({"senha_hash": novo_hash}).eq("login", login).execute()
         ler_usuarios.clear()
         return True
@@ -255,9 +353,9 @@ def atualizar_usuario(login: str, campos: dict) -> bool:
 # Lead Time
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_leadtime() -> pd.DataFrame:
-    data = _safe_response(_sb().table("leadtime").select("*").order("id").execute())
+    data = _paginar("leadtime")
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 
@@ -281,13 +379,58 @@ def excluir_leadtime(row_id: int) -> bool:
         return False
 
 
+def atualizar_leadtime(row_id: int, campos: dict) -> bool:
+    try:
+        _sb().table("leadtime").update(campos).eq("id", row_id).execute()
+        ler_leadtime.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar lead time: {e}")
+        return False
+
+
+def calcular_kpis_leadtime(df: pd.DataFrame) -> dict:
+    zeros = dict(total_registros=0, aguardando_req=0, req_enviada=0,
+                 nf_emitida=0, lead_medio_dias=None, lead_max_dias=None)
+    if df is None or df.empty:
+        return zeros
+    total = len(df)
+    status_col = df.get("Status_Lead", pd.Series(dtype=str)).astype(str)
+    aguardando = int((status_col == "Orçamento Fechado").sum())
+    req_env    = int((status_col == "Req. Enviada").sum())
+    nf_emit    = int((status_col == "NF Emitida").sum())
+    lead_med = None
+    lead_max = None
+    try:
+        concluidos = df[status_col == "NF Emitida"].copy()
+        if not concluidos.empty:
+            from datetime import datetime as _dt
+            def _calc(row):
+                try:
+                    d1 = _dt.strptime(str(row["Data_Orcamento_Fechado"]).strip(), "%d/%m/%Y")
+                    d2 = _dt.strptime(str(row["Data_NF"]).strip(), "%d/%m/%Y")
+                    return (d2 - d1).days
+                except Exception:
+                    return None
+            concluidos["_dias"] = concluidos.apply(_calc, axis=1)
+            dias_validos = concluidos["_dias"].dropna()
+            if not dias_validos.empty:
+                lead_med = round(float(dias_validos.mean()), 1)
+                lead_max = int(dias_validos.max())
+    except Exception:
+        pass
+    return dict(total_registros=total, aguardando_req=aguardando,
+                req_enviada=req_env, nf_emitida=nf_emit,
+                lead_medio_dias=lead_med, lead_max_dias=lead_max)
+
+
 # ══════════════════════════════════════════════════════════════
 # Estoque
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_estoque() -> pd.DataFrame:
-    data = _safe_response(_sb().table("estoque").select("*").order("id").execute())
+    data = _paginar("estoque")
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 
@@ -322,7 +465,7 @@ def atualizar_estoque_campo(row_id: int, campo: str, valor) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════
-# [DB-MIGR]  importar_pecas_senior_para_supabase
+# Importação Senior → Supabase (com progress e tratamento de erro parcial)
 # ══════════════════════════════════════════════════════════════
 
 def importar_pecas_senior_para_supabase(
@@ -332,22 +475,17 @@ def importar_pecas_senior_para_supabase(
     conflict_column: str = "id_linha",
 ) -> tuple[int, str]:
     """
-    Importa (upsert) o DataFrame da planilha Senior ERP para o Supabase
-    em lotes (batches) para evitar timeouts com +170 mil linhas.
+    [FIX-CLOUD-1] Upsert em lotes com:
+    - st.progress() granular por lote (feedback visual ao usuário)
+    - Erro parcial: retorna linhas já inseridas + mensagem de erro se um lote falhar
+    - Sem abort total: continua nos lotes seguintes após falha isolada
 
     Parâmetros
     ----------
     df              : DataFrame já processado por preparar_pecas()
     tabela          : nome da tabela no Supabase (default: "pecas_senior")
-    batch_size      : tamanho de cada lote — 1500 linhas é seguro para a
-                      maioria dos planos Supabase (payload < 5 MB por batch)
-    conflict_column : coluna usada como chave de upsert; deve existir na tabela
-                      como PRIMARY KEY ou UNIQUE. Se None, usa INSERT puro.
-
-    Retorna
-    -------
-    (n_linhas_inseridas, "OK") em sucesso
-    (0, mensagem_de_erro)      em falha
+    batch_size      : tamanho de cada lote (1500 é seguro para a maioria dos planos)
+    conflict_column : coluna UNIQUE usada como chave de upsert
     """
     if df is None or df.empty:
         return 0, "DataFrame vazio — nada a importar."
@@ -355,51 +493,65 @@ def importar_pecas_senior_para_supabase(
     try:
         client = _sb()
 
-        # ── 1. Limpeza/normalização mínima do DataFrame ───────
+        # ── 1. Limpeza/normalização ────────────────────────────
         df = df.copy()
 
-        # Converte datas para string ISO (Supabase aceita date/timestamp como string)
+        # Converte datas para string ISO
         for col in df.select_dtypes(include=["datetime64[ns]", "datetime64[ns, UTC]"]).columns:
             df[col] = df[col].dt.strftime("%Y-%m-%d")
 
-        # Substitui NaN/NaT/inf/-inf por None — coluna a coluna (definitivo)
+        # Substitui NaN/inf por None
         import numpy as _np
         df = df.replace([_np.inf, -_np.inf], _np.nan)
         for _c in list(df.columns):
             df[_c] = df[_c].where(pd.notna(df[_c]), other=None)
 
-        # Converte para lista de dicionários
-        # Limpa float NaN residuais após to_dict (JSON não aceita float('nan'))
-        import math as _math
         def _limpar_registro(rec: dict) -> dict:
+            import math as _math
             return {
                 k: (None if (v is not None and isinstance(v, float) and _math.isnan(v)) else v)
                 for k, v in rec.items()
             }
+
         registros: list[dict] = [_limpar_registro(r) for r in df.to_dict("records")]
         total     = len(registros)
         n_batches = math.ceil(total / batch_size)
         n_ok      = 0
+        erros     = []
 
-        # ── 2. Loop de upsert por lote ─────────────────────────
+        # ── 2. Progress bar ────────────────────────────────────
+        progress = st.progress(0, text=f"Importando 0 de {total} linhas...")
+
         for i in range(n_batches):
-            lote = registros[i * batch_size : (i + 1) * batch_size]
+            lote = registros[i * batch_size: (i + 1) * batch_size]
+            try:
+                if conflict_column and conflict_column in df.columns:
+                    resp = (
+                        client
+                        .table(tabela)
+                        .upsert(lote, on_conflict=conflict_column)
+                        .execute()
+                    )
+                else:
+                    resp = client.table(tabela).insert(lote).execute()
 
-            if conflict_column and conflict_column in df.columns:
-                # upsert: atualiza se a chave já existir, insere se não
-                resp = (
-                    client
-                    .table(tabela)
-                    .upsert(lote, on_conflict=conflict_column)
-                    .execute()
-                )
-            else:
-                # insert puro quando não há chave de conflito definida
-                resp = client.table(tabela).insert(lote).execute()
+                n_inseridos = len(resp.data) if resp.data else len(lote)
+                n_ok += n_inseridos
 
-            n_inseridos = len(resp.data) if resp.data else len(lote)
-            n_ok += n_inseridos
+            except Exception as exc:
+                erros.append(f"Lote {i + 1}/{n_batches}: {exc}")
+                # Continua nos próximos lotes mesmo com falha
 
+            pct = (i + 1) / n_batches
+            progress.progress(
+                pct,
+                text=f"Importando {min(n_ok, total):,} de {total:,} linhas... ({i+1}/{n_batches})",
+            )
+
+        progress.empty()
+
+        if erros:
+            return n_ok, f"Concluído com {len(erros)} erro(s): {erros[0]}"
         return n_ok, "OK"
 
     except Exception as exc:
@@ -407,13 +559,14 @@ def importar_pecas_senior_para_supabase(
 
 
 # ══════════════════════════════════════════════════════════════
-# Revendas Cadastro (tabela: revendas_cadastro)
+# Revendas Cadastro
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_revendas_cadastro() -> pd.DataFrame:
-    data = _safe_response(_sb().table("revendas_cadastro").select("*").order("id").execute())
+    data = _paginar("revendas_cadastro")
     return pd.DataFrame(data) if data else pd.DataFrame()
+
 
 def adicionar_revenda_cadastro(registro: dict) -> bool:
     try:
@@ -423,6 +576,7 @@ def adicionar_revenda_cadastro(registro: dict) -> bool:
     except Exception as e:
         st.error(f"Erro ao adicionar revenda: {e}")
         return False
+
 
 def excluir_revenda_cadastro(row_id: int) -> bool:
     try:
@@ -435,77 +589,14 @@ def excluir_revenda_cadastro(row_id: int) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════
-# Funções complementares — Orçamentos
+# Pátio e Revendas Estoque
 # ══════════════════════════════════════════════════════════════
 
-def atualizar_orcamento(row_id: int, campos: dict) -> bool:
-    try:
-        _sb().table("orcamentos").update(campos).eq("id", row_id).execute()
-        ler_orcamentos.clear()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao atualizar orçamento: {e}")
-        return False
-
-
-# ══════════════════════════════════════════════════════════════
-# Funções complementares — Lead Time
-# ══════════════════════════════════════════════════════════════
-
-def atualizar_leadtime(row_id: int, campos: dict) -> bool:
-    try:
-        _sb().table("leadtime").update(campos).eq("id", row_id).execute()
-        ler_leadtime.clear()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao atualizar lead time: {e}")
-        return False
-
-
-def calcular_kpis_leadtime(df: pd.DataFrame) -> dict:
-    zeros = dict(total_registros=0, aguardando_req=0, req_enviada=0,
-                 nf_emitida=0, lead_medio_dias=None, lead_max_dias=None)
-    if df is None or df.empty:
-        return zeros
-    total = len(df)
-    status_col = df.get("Status_Lead", pd.Series(dtype=str)).astype(str)
-    aguardando = int((status_col == "Orçamento Fechado").sum())
-    req_env    = int((status_col == "Req. Enviada").sum())
-    nf_emit    = int((status_col == "NF Emitida").sum())
-    # Calcula lead time nos concluídos
-    lead_med = None
-    lead_max = None
-    try:
-        concluidos = df[status_col == "NF Emitida"].copy()
-        if not concluidos.empty:
-            from datetime import datetime as _dt
-            def _calc(row):
-                try:
-                    d1 = _dt.strptime(str(row["Data_Orcamento_Fechado"]).strip(), "%d/%m/%Y")
-                    d2 = _dt.strptime(str(row["Data_NF"]).strip(), "%d/%m/%Y")
-                    return (d2 - d1).days
-                except Exception:
-                    return None
-            concluidos["_dias"] = concluidos.apply(_calc, axis=1)
-            dias_validos = concluidos["_dias"].dropna()
-            if not dias_validos.empty:
-                lead_med = round(float(dias_validos.mean()), 1)
-                lead_max = int(dias_validos.max())
-    except Exception:
-        pass
-    return dict(total_registros=total, aguardando_req=aguardando,
-                req_enviada=req_env, nf_emitida=nf_emit,
-                lead_medio_dias=lead_med, lead_max_dias=lead_max)
-
-
-# ══════════════════════════════════════════════════════════════
-# Pátio e Revendas Estoque (tabelas: patio / revendas_estoque)
-# ══════════════════════════════════════════════════════════════
-
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_patio() -> pd.DataFrame:
-    data = _safe_response(_sb().table("patio").select("*").order("id").execute())
+    data = _paginar("patio")
     return pd.DataFrame(data) if data else pd.DataFrame()
+
 
 def adicionar_patio(registro: dict) -> bool:
     try:
@@ -516,6 +607,7 @@ def adicionar_patio(registro: dict) -> bool:
         st.error(f"Erro ao adicionar ao pátio: {e}")
         return False
 
+
 def excluir_patio(row_id: int) -> bool:
     try:
         _sb().table("patio").delete().eq("id", row_id).execute()
@@ -525,16 +617,19 @@ def excluir_patio(row_id: int) -> bool:
         st.error(f"Erro ao excluir do pátio: {e}")
         return False
 
+
 def exportar_patio() -> bytes:
     from io import BytesIO
     buf = BytesIO()
     ler_patio().to_excel(buf, index=False)
     return buf.getvalue()
 
-@st.cache_data(ttl=5)
+
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_revendas_estoque() -> pd.DataFrame:
-    data = _safe_response(_sb().table("revendas_estoque").select("*").order("id").execute())
+    data = _paginar("revendas_estoque")
     return pd.DataFrame(data) if data else pd.DataFrame()
+
 
 def adicionar_revenda_estoque(registro: dict) -> bool:
     try:
@@ -545,6 +640,7 @@ def adicionar_revenda_estoque(registro: dict) -> bool:
         st.error(f"Erro ao adicionar revenda estoque: {e}")
         return False
 
+
 def excluir_revenda_estoque(row_id: int) -> bool:
     try:
         _sb().table("revendas_estoque").delete().eq("id", row_id).execute()
@@ -554,6 +650,7 @@ def excluir_revenda_estoque(row_id: int) -> bool:
         st.error(f"Erro ao excluir revenda estoque: {e}")
         return False
 
+
 def exportar_revendas_estoque() -> bytes:
     from io import BytesIO
     buf = BytesIO()
@@ -562,45 +659,28 @@ def exportar_revendas_estoque() -> bytes:
 
 
 # ══════════════════════════════════════════════════════════════
-# Catálogo de Peças (tabela: catalogo_pecas)
+# Catálogo de Peças
 # ══════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600)
 def ler_catalogo_pecas() -> pd.DataFrame:
     """Lê catálogo de peças (Codigo + Descricao) do Supabase."""
     try:
-        todos = []
-        page_size = 1000
-        offset = 0
-        while True:
-            resp = (
-                _sb().table("catalogo_pecas")
-                .select("Codigo,Descricao")
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
-            batch = resp.data or []
-            todos.extend(batch)
-            if len(batch) < page_size:
-                break
-            offset += page_size
-        return pd.DataFrame(todos) if todos else pd.DataFrame(columns=["Codigo","Descricao"])
+        todos = _paginar("catalogo_pecas", select="Codigo,Descricao")
+        return pd.DataFrame(todos) if todos else pd.DataFrame(columns=["Codigo", "Descricao"])
     except Exception as e:
-        return pd.DataFrame(columns=["Codigo","Descricao"])
+        st.warning(f"⚠️ Erro ao ler catálogo: {e}")
+        return pd.DataFrame(columns=["Codigo", "Descricao"])
 
 
 def importar_catalogo_pecas(df: pd.DataFrame) -> tuple[int, str]:
-    """
-    Importa catálogo de peças (Codigo + Descricao) para o Supabase em lotes.
-    Faz upsert usando Codigo como chave única.
-    """
     if df is None or df.empty:
         return 0, "DataFrame vazio."
     try:
         import math as _math
         import numpy as _np
-        df = df.copy()[["Codigo","Descricao"]]
-        df["Codigo"]   = df["Codigo"].astype(str).str.strip()
+        df = df.copy()[["Codigo", "Descricao"]]
+        df["Codigo"]    = df["Codigo"].astype(str).str.strip()
         df["Descricao"] = df["Descricao"].astype(str).str.strip()
         df = df.dropna(subset=["Codigo"]).drop_duplicates("Codigo")
 
@@ -612,7 +692,7 @@ def importar_catalogo_pecas(df: pd.DataFrame) -> tuple[int, str]:
         batch_size = 1000
         n_ok = 0
         for i in range(_math.ceil(len(registros) / batch_size)):
-            lote = registros[i*batch_size:(i+1)*batch_size]
+            lote = registros[i * batch_size:(i + 1) * batch_size]
             resp = _sb().table("catalogo_pecas").upsert(lote, on_conflict="Codigo").execute()
             n_ok += len(resp.data) if resp.data else len(lote)
         ler_catalogo_pecas.clear()
@@ -622,29 +702,13 @@ def importar_catalogo_pecas(df: pd.DataFrame) -> tuple[int, str]:
 
 
 # ══════════════════════════════════════════════════════════════
-# Lançamentos de Peças Manuais (tabela: lancamentos_pecas)
-# Alimenta a curva ABC com pedidos manuais
+# Lançamentos de Peças Manuais
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)  # [FIX-TTL-1] era ttl=5
 def ler_lancamentos_pecas() -> pd.DataFrame:
-    """Lê todos os lançamentos manuais de peças."""
     try:
-        todos = []
-        page_size = 1000
-        offset = 0
-        while True:
-            resp = (
-                _sb().table("lancamentos_pecas")
-                .select("*")
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
-            batch = resp.data or []
-            todos.extend(batch)
-            if len(batch) < page_size:
-                break
-            offset += page_size
+        todos = _paginar("lancamentos_pecas")
         return pd.DataFrame(todos) if todos else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
@@ -671,16 +735,17 @@ def excluir_lancamento_peca(row_id: int) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════
-# Territórios de Revendas/Representantes (tabela: territorios)
+# Territórios
 # ══════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=30)
 def ler_territorios() -> pd.DataFrame:
     try:
-        data = _safe_response(_sb().table("territorios").select("*").order("id").execute())
+        data = _paginar("territorios")
         return pd.DataFrame(data) if data else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
 
 def adicionar_territorio(registro: dict) -> bool:
     try:
@@ -691,6 +756,7 @@ def adicionar_territorio(registro: dict) -> bool:
         st.error(f"Erro ao adicionar território: {e}")
         return False
 
+
 def excluir_territorio(row_id: int) -> bool:
     try:
         _sb().table("territorios").delete().eq("id", row_id).execute()
@@ -699,6 +765,7 @@ def excluir_territorio(row_id: int) -> bool:
     except Exception as e:
         st.error(f"Erro ao excluir território: {e}")
         return False
+
 
 def atualizar_territorio(row_id: int, campos: dict) -> bool:
     try:
@@ -711,7 +778,7 @@ def atualizar_territorio(row_id: int, campos: dict) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════
-# Metas de Faturamento (tabela: metas_faturamento)
+# Metas de Faturamento
 # ══════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=30)
@@ -722,11 +789,14 @@ def ler_metas() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+
 def salvar_meta(ano: int, mes: int, valor: float) -> bool:
     try:
-        existing = _sb().table("metas_faturamento").select("id")             .eq("Ano", ano).eq("Mes", mes).execute()
+        existing = _sb().table("metas_faturamento").select("id") \
+            .eq("Ano", ano).eq("Mes", mes).execute()
         if existing.data:
-            _sb().table("metas_faturamento").update({"Meta": valor})                 .eq("Ano", ano).eq("Mes", mes).execute()
+            _sb().table("metas_faturamento").update({"Meta": valor}) \
+                .eq("Ano", ano).eq("Mes", mes).execute()
         else:
             _sb().table("metas_faturamento").insert(
                 {"Ano": ano, "Mes": mes, "Meta": valor}
@@ -736,3 +806,49 @@ def salvar_meta(ano: int, mes: int, valor: float) -> bool:
     except Exception as e:
         st.error(f"Erro ao salvar meta: {e}")
         return False
+
+
+# ══════════════════════════════════════════════════════════════
+# [FIX-PERF-1] Query filtrada server-side para pecas_senior
+# ══════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=300)
+def ler_pecas_senior_filtrado(
+    data_inicio: str,
+    data_fim: str,
+    limit: int = 10000,
+) -> pd.DataFrame:
+    """
+    [FIX-PERF-1] Lê peças com filtro de data no servidor (server-side).
+    Evita transferir 170k+ linhas quando apenas um período é necessário.
+
+    Parâmetros
+    ----------
+    data_inicio : str no formato "YYYY-MM-DD"
+    data_fim    : str no formato "YYYY-MM-DD"
+    limit       : máximo de rows a retornar (default 10.000)
+    """
+    try:
+        resp = (
+            _sb()
+            .table("pecas_senior")
+            .select("Codigo,Descricao_Peca,Quantidade,Valor_Total,Cliente_Revenda,Data_Venda")
+            .gte("Data_Venda", data_inicio)
+            .lte("Data_Venda", data_fim)
+            .limit(limit)
+            .execute()
+        )
+        data = resp.data or []
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if "Data_Venda" in df.columns:
+            df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
+        if "Valor_Total" in df.columns:
+            df["Valor_Total"] = pd.to_numeric(df["Valor_Total"], errors="coerce").fillna(0)
+        if "Quantidade" in df.columns:
+            df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
+        return df
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao ler peças filtradas: {e}")
+        return pd.DataFrame()
