@@ -33,10 +33,18 @@ from components.forms        import (
     render_formulario_orcamento_pecas,
     render_formulario_revendas,
 )
-from components.tab_crm_maquinas import render_aba_crm_maquinas
+try:
+    from components.tab_crm_maquinas import render_aba_crm_maquinas
+except ImportError:
+    def render_aba_crm_maquinas():
+        st.error("Módulo CRM não encontrado. Verifique components/tab_crm_maquinas.py")
 from components.nf_demo      import render_aba_nf_demo
 from data.db                 import ler_orcamentos, importar_pecas_senior_para_supabase, importar_catalogo_pecas, ler_catalogo_pecas, ler_lancamentos_pecas
-from components.tab_territorios import render_aba_territorios
+try:
+    from components.tab_territorios import render_aba_territorios
+except ImportError:
+    def render_aba_territorios():
+        st.error("Módulo Territórios não encontrado.")
 from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas, grafico_top_produtos
 
 # ══════════════════════════════════════════════════════════════
