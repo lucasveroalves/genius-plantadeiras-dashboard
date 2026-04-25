@@ -431,7 +431,7 @@ def render_aba_territorios():
         st.markdown("---")
         st.markdown("**📤 Importar em lote (CSV)**")
         st.caption("CSV com colunas: Revenda, Representante, Cidade, Estado, Observacoes")
-        up = st.file_uploader("", type=["csv"], key="up_terr")
+        up = st.file_uploader("Arquivo CSV", type=["csv"], key="up_terr", label_visibility="collapsed")
         if up:
             try:
                 df_up = pd.read_csv(up, sep=None, engine="python")
