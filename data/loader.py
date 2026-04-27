@@ -138,16 +138,18 @@ def _processar_senior(df: pd.DataFrame, df_catalogo: pd.DataFrame | None = None)
 
     df = limpar_colunas(df.copy())
 
-    # Mapeamento Senior → schema interno
+    # [FIX-COLS] Mapeamento exato das colunas da planilha Senior
+    # Coluna do nome do cliente é "Unnamed:_6" após normalização
     rename_map = {
-        "Serie":    "Serie",
-        "Numero":   "Numero_NF",
-        "Emissao":  "Data_Venda",
-        "Produto":  "Codigo",
-        "Cliente":  "Cod_Cliente",
-        "Qtde_Fat_":"Quantidade",
-        "Preco_Un_":"Valor_Unitario",
-        "Vlr_Liq_": "Valor_Total",
+        "Serie":      "Serie",
+        "Numero":     "Numero_NF",
+        "Emissao":    "Data_Venda",
+        "Produto":    "Codigo",
+        "Cliente":    "Cod_Cliente",
+        "Unnamed:_6": "Cliente_Revenda",  # Nome do cliente — coluna sem cabeçalho no Senior
+        "Qtde_Fat_":  "Quantidade",
+        "Preco_Un_":  "Valor_Unitario",
+        "Vlr_Liq_":   "Valor_Total",
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
@@ -182,26 +184,17 @@ def _processar_senior(df: pd.DataFrame, df_catalogo: pd.DataFrame | None = None)
         if col in df.columns:
             df[col] = limpar_moeda_brl(df[col])
 
-    # Nome do cliente — coluna após Cod_Cliente costuma ser o nome completo
-    # Detecta pela média de comprimento dos valores (nome > 8 chars)
-    col_nome_cliente = None
-    colunas_conhecidas = set(rename_map.values()) | {"Serie", "Derivacao", "UM",
-                                                      "TnsNfv", "TnsPro", "Sit_", "Situacao"}
-    for c in df.columns:
-        if c not in colunas_conhecidas:
-            amostra = df[c].dropna().astype(str)
-            if len(amostra) > 10 and amostra.str.len().mean() > 8 and not amostra.str.match(r"^\d+$").all():
-                col_nome_cliente = c
-                break
+    # [FIX-COLS] Cliente_Revenda já mapeado diretamente de Unnamed:_6
+    # Se por algum motivo não veio, usa Cod_Cliente como fallback
+    if "Cliente_Revenda" not in df.columns or df["Cliente_Revenda"].isna().all():
+        if "Cod_Cliente" in df.columns:
+            df["Cliente_Revenda"] = df["Cod_Cliente"].astype(str)
+        else:
+            df["Cliente_Revenda"] = "Não informado"
 
-    if col_nome_cliente:
-        df["Cliente_Revenda"] = df[col_nome_cliente].astype(str).str.strip()
-    elif "Cod_Cliente" in df.columns:
-        df["Cliente_Revenda"] = df["Cod_Cliente"].astype(str)
-    else:
-        df["Cliente_Revenda"] = "Não informado"
-
-    df["Cliente_Revenda"] = df["Cliente_Revenda"].replace(["nan", "", "None"], "Não informado")
+    df["Cliente_Revenda"] = (df["Cliente_Revenda"]
+                              .astype(str).str.strip()
+                              .replace(["nan", "", "None"], "Não informado"))
 
     # [FIX-CHAVE] Chave única para deduplicação na importação diária
     cod_cli = df.get("Cod_Cliente", df["Cliente_Revenda"])
@@ -220,9 +213,23 @@ def _processar_senior(df: pd.DataFrame, df_catalogo: pd.DataFrame | None = None)
         mapa = df_cat.set_index("Codigo")["Descricao"].to_dict()
         df["Descricao_Peca"] = df["Codigo"].map(mapa).fillna("")
 
-    # Garante colunas finais
+    # [FIX-COLS] Colunas finais mapeadas exatamente para o schema do Supabase
+    # Renomeia para os nomes exatos da tabela pecas_senior
+    if "Numero_NF" in df.columns:
+        df = df.rename(columns={"Numero_NF": "Numero"})
+
+    # Data_Venda como string ISO para o tipo date do Supabase
+    if "Data_Venda" in df.columns:
+        df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    # Valor_Total e Quantidade como float
+    for col in ["Quantidade", "Valor_Unitario", "Valor_Total"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    # Colunas que existem no Supabase
     colunas_finais = [
-        "Serie", "Numero_NF", "Data_Venda", "Codigo", "Descricao_Peca",
+        "Serie", "Numero", "Data_Venda", "Codigo", "Descricao_Peca",
         "Quantidade", "Valor_Unitario", "Valor_Total",
         "Cliente_Revenda", "chave_nf",
     ]
