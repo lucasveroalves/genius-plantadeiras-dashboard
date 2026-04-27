@@ -102,16 +102,27 @@ if _catalogo_file is not None and not st.session_state.get("_catalogo_importado"
         except Exception as e:
             st.sidebar.error(f"❌ Erro ao ler catálogo: {e}")
 
-if _peca_file is not None and not st.session_state.get("_pecas_importadas"):
-    with st.spinner("⬆️ Carregando planilha e importando para o banco..."):
-        df_raw, _ = preparar_pecas(_peca_file)
-        if not df_raw.empty:
-            n_ok, msg_imp = importar_pecas_senior_para_supabase(df_raw)
-            if msg_imp == "OK":
-                st.sidebar.success(f"✅ {n_ok} linha(s) importadas para o Supabase!")
-                st.session_state["_pecas_importadas"] = True
-            else:
-                st.sidebar.error(f"❌ Importação: {msg_imp}")
+if _peca_file is not None:
+    import hashlib as _hl
+    _peca_file.seek(0)
+    _fhash = _hl.md5(_peca_file.read()).hexdigest()
+    _peca_file.seek(0)
+    if st.session_state.get("_pecas_hash_importado") != _fhash:
+        with st.spinner("⬆️ Importando planilha para o banco..."):
+            try:
+                df_raw, _ = preparar_pecas(_peca_file)
+                _peca_file.seek(0)
+                if not df_raw.empty:
+                    n_ok, msg_imp = importar_pecas_senior_para_supabase(df_raw)
+                    if msg_imp == "OK":
+                        st.sidebar.success(f"✅ {n_ok} linha(s) salvas no Supabase!")
+                        st.session_state["_pecas_hash_importado"] = _fhash
+                        from data.loader import _ler_pecas_supabase
+                        _ler_pecas_supabase.clear()
+                    else:
+                        st.sidebar.error(f"❌ Erro na importação: {msg_imp}")
+            except Exception as _e:
+                st.sidebar.error(f"❌ Erro inesperado: {_e}")
 
 df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
 
