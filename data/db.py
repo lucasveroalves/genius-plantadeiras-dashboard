@@ -472,7 +472,7 @@ def importar_pecas_senior_para_supabase(
     df: pd.DataFrame,
     tabela: str = "pecas_senior",
     batch_size: int = 1500,
-    conflict_column: str = "id_linha",
+    conflict_column: str = None,  # [FIX-IDLINHA] id_linha removida do banco — usa INSERT simples
 ) -> tuple[int, str]:
     """
     [FIX-CLOUD-1] Upsert em lotes com:
