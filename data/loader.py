@@ -1,30 +1,32 @@
 """
-data/loader.py — Genius Implementos Agrícolas v16 (AUDITORIA)
+data/loader.py — Genius Implementos Agrícolas v17
 
 Correções aplicadas:
-  [FIX-IMPORT-1] Adicionadas constantes STATUS_FATURADO_LOWER, STATUS_PIPELINE_LOWER,
-                 STATUS_ALERTA_LOWER que calculators.py importa — estavam faltando.
-  [FIX-BUG-4]   calcular_kpis_pecas: df_orc filtrado pelo mesmo período das peças.
-  [FIX-PERF-5]  limpar_moeda_brl: pipeline vetorizado (10-50x mais rápido).
-  [FIX-PERF-6]  @st.cache_data com ttl=300 por entrada.
-  [FIX-BUG-2]   tz_convert(None) para dados tz-aware.
-  [FIX-BUG-3]   dropna() antes de comparação de datas.
-  [FIX-SENIOR]  Reescrita completa baseada na estrutura real do Senior ERP.
+  [FIX-CHAVE]   Chave única por linha: Série + Número NF + Produto + Cód.Cliente
+                Permite importação diária sem duplicar registros já existentes.
+  [FIX-HEADER]  Cabeçalho real na linha 4 da planilha Senior (header=4).
+                Colunas: Série, Número, Emissão, Produto, Derivação,
+                Cliente, Nome, Qtde.Fat., UM, Preço Un., Vlr.Liq., TnsNfv, TnsPro, Sit.
+  [FIX-FAMILIA] Linhas de agrupamento por Família removidas (Série != NFE/NFS).
+  [FIX-CAT]     Catálogo lido de ESTOQUES_MIN_MAX_COMPRADOS.xlsx
+                (header linha 4, colunas CÓDIGO + DESCRIÇÃO — 10.727 produtos).
+  [FIX-IMPORT-1] Constantes STATUS_* mantidas para calculators.py.
 """
 
 from __future__ import annotations
-import io, unicodedata, hashlib
+import hashlib
+import unicodedata
 import pandas as pd
 import streamlit as st
 
 
 # ══════════════════════════════════════════════════════════════
-# [FIX-IMPORT-1] Constantes de status importadas por calculators.py
+# Constantes de status (importadas por calculators.py)
 # ══════════════════════════════════════════════════════════════
 
 STATUS_FATURADO_LOWER  = ["faturado", "entregue", "pedido fechado"]
-STATUS_PIPELINE_LOWER  = ["em negociação", "em aberto", "crédito", "pronto para faturar",
-                           "pedido fechado", "faturado"]
+STATUS_PIPELINE_LOWER  = ["em negociação", "em aberto", "crédito",
+                           "pronto para faturar", "pedido fechado", "faturado"]
 STATUS_ALERTA_LOWER    = ["em negociação", "em aberto"]
 
 
@@ -44,7 +46,7 @@ def limpar_colunas(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def limpar_moeda_brl(serie: pd.Series) -> pd.Series:
-    """[FIX-PERF-5] Conversão vetorizada."""
+    """Conversão vetorizada BRL → float."""
     if pd.api.types.is_numeric_dtype(serie):
         return serie.fillna(0.0).astype(float)
     s = (serie.astype(str)
@@ -61,137 +63,178 @@ def limpar_moeda_brl(serie: pd.Series) -> pd.Series:
 
 def criar_mock_pecas() -> pd.DataFrame:
     return pd.DataFrame(columns=[
-        "Codigo", "Descricao_Peca", "Quantidade", "Valor_Unitario",
-        "Valor_Total", "Cliente_Revenda", "Data_Venda", "Status_Peca",
+        "Serie", "Numero_NF", "Data_Venda", "Codigo", "Descricao_Peca",
+        "Quantidade", "Valor_Unitario", "Valor_Total",
+        "Cliente_Revenda", "chave_nf",
     ])
 
 
 # ══════════════════════════════════════════════════════════════
-# Leitura do arquivo Senior ERP
+# [FIX-CHAVE] Chave única por linha de venda
 # ══════════════════════════════════════════════════════════════
 
-def _encontrar_linha_cabecalho(df_raw: pd.DataFrame) -> int:
-    keywords = {"emissao", "emissao_", "produto", "vlr", "cliente",
-                "qtde", "preco", "serie", "numero"}
-    for i in range(min(20, len(df_raw))):
-        row_vals = set()
-        for v in df_raw.iloc[i].values:
-            if pd.notna(v):
-                norm = (unicodedata.normalize("NFKD", str(v))
-                        .encode("ascii", "ignore").decode("ascii")
-                        .strip().lower().replace(".", "_").replace(" ", "_"))
-                row_vals.add(norm)
-        if len(row_vals & keywords) >= 2:
-            return i
-    return 4
+def _gerar_chave_nf(serie: str, numero: str, produto: str, cod_cliente: str) -> str:
+    """
+    Chave única: Série-NúmeroNF-Produto-CódCliente
+    Exemplo: NFE-17613-200000059-4321
+    Garante que a mesma linha não seja inserida duas vezes,
+    mesmo que a planilha seja importada múltiplas vezes.
+    """
+    return f"{str(serie).strip()}-{str(numero).strip()}-{str(produto).strip()}-{str(cod_cliente).strip()}"
 
+
+# ══════════════════════════════════════════════════════════════
+# [FIX-CAT] Leitura do catálogo ESTOQUES_MIN_MAX_COMPRADOS.xlsx
+# ══════════════════════════════════════════════════════════════
+
+def ler_catalogo_xlsx(file_bytes: bytes) -> pd.DataFrame:
+    """
+    Lê CÓDIGO + DESCRIÇÃO do catálogo de peças.
+    Header real na linha 4 (header=4).
+    Retorna DataFrame com colunas: Codigo, Descricao
+    """
+    import io
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes), header=4, engine="openpyxl")
+        cols = list(df.columns)
+        col_cod  = next((c for c in cols if "CÓDIGO" in str(c).upper() or "CODIGO" in str(c).upper()), None)
+        col_desc = next((c for c in cols if "DESCRI" in str(c).upper()), None)
+        if not col_cod or not col_desc:
+            return pd.DataFrame(columns=["Codigo", "Descricao"])
+        result = df[[col_cod, col_desc]].copy()
+        result.columns = ["Codigo", "Descricao"]
+        result["Codigo"]    = result["Codigo"].astype(str).str.strip()
+        result["Descricao"] = result["Descricao"].astype(str).str.strip()
+        result = result.dropna(subset=["Codigo", "Descricao"])
+        result = result[result["Codigo"].str.match(r"^\d+$", na=False)]
+        result = result[result["Descricao"].str.len() > 2]
+        return result.drop_duplicates("Codigo").reset_index(drop=True)
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao ler catálogo: {e}")
+        return pd.DataFrame(columns=["Codigo", "Descricao"])
+
+
+# ══════════════════════════════════════════════════════════════
+# [FIX-HEADER] Leitura e processamento da planilha Senior
+# ══════════════════════════════════════════════════════════════
 
 def _ler_senior_xlsx(file_bytes: bytes) -> pd.DataFrame:
-    df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine="openpyxl")
-    header_row = _encontrar_linha_cabecalho(df_raw)
-    df = pd.read_excel(io.BytesIO(file_bytes), header=header_row, engine="openpyxl")
-    return df
+    """Header real na linha 4 (0-indexed)."""
+    import io
+    return pd.read_excel(io.BytesIO(file_bytes), header=4, engine="openpyxl")
 
 
-def _processar_senior(df: pd.DataFrame) -> pd.DataFrame:
-    # Passo 1: capturar coluna de nome do cliente ANTES de normalizar
-    cols_orig = list(df.columns)
-    nome_cliente_col_orig = None
-    for i, col in enumerate(cols_orig):
-        if str(col).strip().lower() == "cliente":
-            if i + 1 < len(cols_orig):
-                prox = str(cols_orig[i + 1]).strip()
-                if prox.startswith("Unnamed") or prox == "" or prox.lower() == "nan":
-                    nome_cliente_col_orig = cols_orig[i + 1]
-            break
+def _processar_senior(df: pd.DataFrame, df_catalogo: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    Processa planilha Senior:
+    1. Remove linhas de agrupamento por Família
+    2. Filtra NFs válidas (Série = NFE ou NFS)
+    3. Renomeia colunas para schema interno
+    4. [FIX-CHAVE] Gera chave única por linha
+    5. Enriquece com descrição do catálogo
+    """
+    if df is None or df.empty:
+        return criar_mock_pecas()
 
-    # Passo 2: normalizar nomes de colunas
-    df = limpar_colunas(df)
-    nome_cliente_col_norm = (_norm_col(str(nome_cliente_col_orig))
-                             if nome_cliente_col_orig is not None else None)
+    df = limpar_colunas(df.copy())
 
-    # Passo 3: renomear para schema interno
-    mapeamento = {
-        "Emissao":           "Data_Venda",
-        "Emissao_":          "Data_Venda",
-        "Data":              "Data_Venda",
-        "Produto":           "Codigo",
-        "Qtde_Fat_":         "Quantidade",
-        "Quantidade":        "Quantidade",
-        "Preco_Un_":         "Valor_Unitario",
-        "Vlr_Liq_":          "Valor_Total",
-        "Descricao":         "Descricao_Peca",
-        "Descricao_Produto": "Descricao_Peca",
+    # Mapeamento Senior → schema interno
+    rename_map = {
+        "Serie":    "Serie",
+        "Numero":   "Numero_NF",
+        "Emissao":  "Data_Venda",
+        "Produto":  "Codigo",
+        "Cliente":  "Cod_Cliente",
+        "Qtde_Fat_":"Quantidade",
+        "Preco_Un_":"Valor_Unitario",
+        "Vlr_Liq_": "Valor_Total",
     }
-    if nome_cliente_col_norm and nome_cliente_col_norm in df.columns:
-        mapeamento[nome_cliente_col_norm] = "Cliente_Revenda"
-    elif "Cliente" in df.columns:
-        mapeamento["Cliente"] = "Cliente_Revenda"
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    rename_map = {k: v for k, v in mapeamento.items() if k in df.columns and k != v}
-    df = df.rename(columns=rename_map)
+    # [FIX-FAMILIA] Filtra apenas NFE/NFS — remove linhas de família e totais
+    if "Serie" not in df.columns:
+        return criar_mock_pecas()
+    df["Serie"] = df["Serie"].astype(str).str.strip()
+    df = df[df["Serie"].isin(["NFE", "NFS"])]
 
-    # Passo 4: remover linhas de agrupamento por Família
-    if "Serie" in df.columns:
-        df = df[~df["Serie"].astype(str).str.strip().str.lower().isin(
-            ["família:", "familia:", "familia", "família", "famlia:"]
-        )]
-    if "Codigo" in df.columns:
-        df = df[~df["Codigo"].astype(str).str.contains(
-            r"Família|Familia|^nan$", na=False, regex=True
-        )]
-
-    # Passo 5: filtrar apenas linhas com código de peça válido
-    if "Codigo" in df.columns:
-        df = df.dropna(subset=["Codigo"])
-
-        def _norm_codigo(v):
-            try:
-                return str(int(float(str(v).strip())))
-            except Exception:
-                return str(v).strip()
-
-        df["Codigo"] = df["Codigo"].apply(_norm_codigo)
-        df = df[df["Codigo"] != ""]
-        df = df[df["Codigo"].str.lower() != "nan"]
-        df = df[df["Codigo"].str.match(r"^\d+$", na=False)]
+    # Filtra código de produto numérico válido
+    if "Codigo" not in df.columns:
+        return criar_mock_pecas()
+    df["Codigo"] = df["Codigo"].astype(str).str.strip()
+    df = df[df["Codigo"].str.match(r"^\d+$", na=False)].dropna(subset=["Codigo"])
 
     if df.empty:
-        return df
+        return criar_mock_pecas()
 
-    # Passo 6: converter tipos
-    if "Quantidade" in df.columns:
-        df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
-    for col in ["Valor_Unitario", "Valor_Total"]:
-        if col in df.columns:
-            df[col] = limpar_moeda_brl(df[col])
+    # Número da NF
+    if "Numero_NF" in df.columns:
+        df["Numero_NF"] = df["Numero_NF"].astype(str).str.strip()
+
+    # Data
     if "Data_Venda" in df.columns:
         df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
         if df["Data_Venda"].dt.tz is not None:
             df["Data_Venda"] = df["Data_Venda"].dt.tz_localize(None)
         df = df.dropna(subset=["Data_Venda"])
 
-    # Passo 7: limpar Cliente_Revenda
-    if "Cliente_Revenda" not in df.columns:
-        df["Cliente_Revenda"] = "Não informado"
+    # Valores numéricos
+    for col in ["Quantidade", "Valor_Unitario", "Valor_Total"]:
+        if col in df.columns:
+            df[col] = limpar_moeda_brl(df[col])
+
+    # Nome do cliente — coluna após Cod_Cliente costuma ser o nome completo
+    # Detecta pela média de comprimento dos valores (nome > 8 chars)
+    col_nome_cliente = None
+    colunas_conhecidas = set(rename_map.values()) | {"Serie", "Derivacao", "UM",
+                                                      "TnsNfv", "TnsPro", "Sit_", "Situacao"}
+    for c in df.columns:
+        if c not in colunas_conhecidas:
+            amostra = df[c].dropna().astype(str)
+            if len(amostra) > 10 and amostra.str.len().mean() > 8 and not amostra.str.match(r"^\d+$").all():
+                col_nome_cliente = c
+                break
+
+    if col_nome_cliente:
+        df["Cliente_Revenda"] = df[col_nome_cliente].astype(str).str.strip()
+    elif "Cod_Cliente" in df.columns:
+        df["Cliente_Revenda"] = df["Cod_Cliente"].astype(str)
     else:
-        df["Cliente_Revenda"] = (df["Cliente_Revenda"]
-                                 .fillna("Não informado")
-                                 .astype(str).str.strip())
-        df.loc[df["Cliente_Revenda"].isin(["", "nan"]), "Cliente_Revenda"] = "Não informado"
+        df["Cliente_Revenda"] = "Não informado"
 
-    # Passo 8: colunas obrigatórias
-    df["Status_Peca"] = "Faturado"
-    for col in ["Codigo", "Descricao_Peca", "Quantidade", "Valor_Unitario",
-                "Valor_Total", "Cliente_Revenda", "Data_Venda", "Status_Peca"]:
-        if col not in df.columns:
-            df[col] = "" if col not in ["Quantidade", "Valor_Unitario", "Valor_Total"] else 0.0
+    df["Cliente_Revenda"] = df["Cliente_Revenda"].replace(["nan", "", "None"], "Não informado")
 
-    return df.reset_index(drop=True)
+    # [FIX-CHAVE] Chave única para deduplicação na importação diária
+    cod_cli = df.get("Cod_Cliente", df["Cliente_Revenda"])
+    df["chave_nf"] = (
+        df["Serie"].astype(str) + "-" +
+        df.get("Numero_NF", pd.Series("0", index=df.index)).astype(str) + "-" +
+        df["Codigo"].astype(str) + "-" +
+        cod_cli.astype(str)
+    )
+
+    # Enriquece com descrição do catálogo
+    df["Descricao_Peca"] = ""
+    if df_catalogo is not None and not df_catalogo.empty:
+        df_cat = df_catalogo.copy()
+        df_cat["Codigo"] = df_cat["Codigo"].astype(str).str.strip()
+        mapa = df_cat.set_index("Codigo")["Descricao"].to_dict()
+        df["Descricao_Peca"] = df["Codigo"].map(mapa).fillna("")
+
+    # Garante colunas finais
+    colunas_finais = [
+        "Serie", "Numero_NF", "Data_Venda", "Codigo", "Descricao_Peca",
+        "Quantidade", "Valor_Unitario", "Valor_Total",
+        "Cliente_Revenda", "chave_nf",
+    ]
+    for c in colunas_finais:
+        if c not in df.columns:
+            df[c] = "" if c not in ["Quantidade", "Valor_Unitario", "Valor_Total"] else 0.0
+
+    return df[colunas_finais].reset_index(drop=True)
 
 
 # ══════════════════════════════════════════════════════════════
-# Cache e processamento
+# Cache e processamento principal
 # ══════════════════════════════════════════════════════════════
 
 def _file_hash(file_bytes: bytes) -> str:
@@ -199,42 +242,31 @@ def _file_hash(file_bytes: bytes) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str) -> tuple[pd.DataFrame, bool]:
-    """[FIX-PERF-6] TTL=300s por entrada. file_hash = chave de cache."""
+def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str,
+                     catalogo_hash: str = "", catalogo_bytes: bytes = b"") -> tuple[pd.DataFrame, bool]:
     try:
+        df_cat = None
+        if catalogo_bytes:
+            df_cat = ler_catalogo_xlsx(catalogo_bytes)
         df_raw = _ler_senior_xlsx(file_bytes)
-        df     = _processar_senior(df_raw)
+        df     = _processar_senior(df_raw, df_cat)
         if df.empty:
-            st.warning(
-                f"⚠️ A planilha '{file_name}' foi lida mas nenhum registro de peça foi encontrado.\n"
-                "Verifique se há linhas com código de produto numérico (ex: 200001114)."
-            )
+            st.warning(f"⚠️ Nenhum registro encontrado em '{file_name}'.")
             return criar_mock_pecas(), True
         return df, False
     except Exception as e:
-        st.error(
-            f"❌ Erro ao processar '{file_name}': {e}\n\n"
-            "Tente abrir o arquivo no Excel, salvar novamente como .xlsx e fazer upload."
-        )
+        st.error(f"❌ Erro ao processar '{file_name}': {e}")
         return criar_mock_pecas(), True
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _ler_pecas_supabase() -> pd.DataFrame:
-    """Lê peças do Supabase com cache de 1 hora."""
     try:
         from data.db import _sb
         client = _sb()
-        todos = []
-        page_size = 1000
-        offset = 0
+        todos, offset, page_size = [], 0, 1000
         while True:
-            resp = (
-                client.table("pecas_senior")
-                .select("*")
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
+            resp  = client.table("pecas_senior").select("*").range(offset, offset + page_size - 1).execute()
             batch = resp.data or []
             todos.extend(batch)
             if len(batch) < page_size:
@@ -243,16 +275,8 @@ def _ler_pecas_supabase() -> pd.DataFrame:
         if not todos:
             return pd.DataFrame()
         df = pd.DataFrame(todos)
-        rename = {
-            "Emissao":   "Data_Venda",
-            "Produto":   "Codigo",
-            "Qtde_Fat_": "Quantidade",
-            "Vlr_Liq_":  "Valor_Total",
-            "Preco_Un_": "Valor_Unitario",
-        }
-        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
         if "Data_Venda" in df.columns:
-            df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce", dayfirst=True)
+            df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
         if "Valor_Total" in df.columns:
             df["Valor_Total"] = pd.to_numeric(df["Valor_Total"], errors="coerce").fillna(0)
         if "Quantidade" in df.columns:
@@ -263,19 +287,18 @@ def _ler_pecas_supabase() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
-    """
-    Hierarquia de fontes:
-    1. Upload novo → processa + importa para Supabase + salva em session_state
-    2. Supabase (pecas_senior) — fonte principal em produção
-    3. session_state (fallback se Supabase falhou)
-    4. Mock (fallback quando banco vazio)
-    """
+def preparar_pecas(_uploaded_file, _catalogo_file=None) -> tuple[pd.DataFrame, bool]:
     if _uploaded_file is not None:
         _uploaded_file.seek(0)
         file_bytes = _uploaded_file.read()
         fhash = _file_hash(file_bytes)
-        df, is_mock = _processar_bytes(fhash, file_bytes, _uploaded_file.name)
+        cat_bytes, cat_hash = b"", ""
+        if _catalogo_file is not None:
+            _catalogo_file.seek(0)
+            cat_bytes = _catalogo_file.read()
+            cat_hash  = _file_hash(cat_bytes)
+        df, is_mock = _processar_bytes(fhash, file_bytes, _uploaded_file.name,
+                                        cat_hash, cat_bytes)
         if not is_mock:
             st.session_state["_pecas_df"]   = df
             st.session_state["_pecas_nome"] = _uploaded_file.name
@@ -285,175 +308,100 @@ def preparar_pecas(_uploaded_file) -> tuple[pd.DataFrame, bool]:
     if not df_sb.empty:
         st.session_state["_pecas_df"]   = df_sb
         st.session_state["_pecas_nome"] = "Supabase"
-        n = len(df_sb)
-        st.sidebar.caption(f"📂 Peças: {n:,} registros")
+        st.sidebar.caption(f"📂 Peças: {len(df_sb):,} registros")
         return df_sb, False
 
     if "_pecas_df" in st.session_state:
-        nome = st.session_state.get("_pecas_nome", "cache local")
-        st.sidebar.caption(f"📂 Peças: {nome} (cache)")
+        st.sidebar.caption(f"📂 Peças: {st.session_state.get('_pecas_nome','cache')} (cache)")
         return st.session_state["_pecas_df"], False
 
     return criar_mock_pecas(), True
 
 
 # ══════════════════════════════════════════════════════════════
-# KPIs
+# KPIs e análises
 # ══════════════════════════════════════════════════════════════
 
 def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
                         data_inicio=None, data_fim=None) -> dict:
-    """[FIX-BUG-4] df_orc filtrado pelo mesmo período de datas que df."""
     _zero = {"total_faturado": 0, "total_pedidos": 0,
              "volume_itens": 0, "ticket_medio": 0, "qtd_skus": 0, "em_orcamento": 0}
-
     if df is None or df.empty:
-        fat = pd.DataFrame()
-        faturamento = volume = 0.0
-        n = qtd_skus = 0
-    else:
-        fat = df.copy()
-        col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq", "Vlr.Liq."] if c in fat.columns), None)
-        col_qtd   = next((c for c in ["Quantidade", "Qtde_Fat_", "qtde_fat", "Qtde.Fat."] if c in fat.columns), None)
-        col_cod   = next((c for c in ["Codigo", "Produto", "produto", "codigo"] if c in fat.columns), None)
-        faturamento = pd.to_numeric(fat[col_valor], errors="coerce").fillna(0).sum() if col_valor else 0.0
-        volume      = pd.to_numeric(fat[col_qtd],   errors="coerce").fillna(0).sum() if col_qtd   else 0.0
-        n           = len(fat)
-        qtd_skus    = fat[col_cod].nunique() if col_cod else 0
-
-        if data_inicio is None and not fat.empty and "Data_Venda" in fat.columns:
-            try:
-                data_inicio = fat["Data_Venda"].min().date()
-                data_fim    = fat["Data_Venda"].max().date()
-            except Exception:
-                pass
-
-    em_orcamento = 0.0
+        return _zero
+    col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_"] if c in df.columns), None)
+    col_qtd   = next((c for c in ["Quantidade", "Qtde_Fat_"] if c in df.columns), None)
+    col_cod   = next((c for c in ["Codigo", "Produto"] if c in df.columns), None)
+    fat  = pd.to_numeric(df[col_valor], errors="coerce").fillna(0).sum() if col_valor else 0.0
+    vol  = pd.to_numeric(df[col_qtd],   errors="coerce").fillna(0).sum() if col_qtd   else 0.0
+    n    = len(df)
+    skus = df[col_cod].nunique() if col_cod else 0
+    em_orc = 0.0
     if df_orc is not None and not df_orc.empty and "Status_Orc" in df_orc.columns:
-        df_orc_f = df_orc.copy()
-        if data_inicio is not None and "Data_Orcamento" in df_orc.columns:
-            try:
-                d = pd.to_datetime(df_orc_f["Data_Orcamento"], errors="coerce", dayfirst=True)
-                df_orc_f = df_orc_f[(d.dt.date >= data_inicio) & (d.dt.date <= data_fim)]
-            except Exception:
-                pass
-        fechados     = df_orc_f[df_orc_f["Status_Orc"] == "Fechado"]
-        faturamento += pd.to_numeric(fechados.get("Valor_Total", pd.Series(dtype=float)),
-                                     errors="coerce").fillna(0).sum()
-        aguardando   = df_orc_f[df_orc_f["Status_Orc"] == "Aguardando"]
-        em_orcamento = pd.to_numeric(aguardando.get("Valor_Total", pd.Series(dtype=float)),
-                                     errors="coerce").fillna(0).sum()
-
-    return {
-        "total_faturado": float(faturamento),
-        "total_pedidos":  int(n),
-        "volume_itens":   float(volume),
-        "ticket_medio":   float(faturamento / n) if n > 0 else 0.0,
-        "qtd_skus":       int(qtd_skus),
-        "em_orcamento":   float(em_orcamento),
-    }
-
-
-def calcular_curva_abc(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
-    _cols = ["Descricao_Peca", "Valor_Total", "Pct", "Curva"]
-    if df is None or df.empty or "Descricao_Peca" not in df.columns:
-        return pd.DataFrame(columns=_cols)
-    abc = df.groupby("Descricao_Peca")["Valor_Total"].sum().sort_values(ascending=False).reset_index()
-    abc = abc[abc["Valor_Total"] > 0].reset_index(drop=True)
-    if abc.empty:
-        return pd.DataFrame(columns=_cols)
-    total        = abc["Valor_Total"].sum()
-    abc["Pct"]   = abc["Valor_Total"] / total * 100
-    abc["Pct_Acum"] = abc["Pct"].cumsum()
-    abc["Curva"] = abc["Pct_Acum"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
-    return abc.head(top_n)
+        ag = df_orc[df_orc["Status_Orc"] == "Aguardando"]
+        em_orc = pd.to_numeric(ag.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    return {"total_faturado": float(fat), "total_pedidos": int(n), "volume_itens": float(vol),
+            "ticket_medio": float(fat/n) if n > 0 else 0.0, "qtd_skus": int(skus), "em_orcamento": float(em_orc)}
 
 
 def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Pct_Acum", "Curva"]
     if df is None or df.empty:
         return pd.DataFrame(columns=_cols)
-
-    col_cod   = next((c for c in ["Codigo", "Produto", "produto", "codigo"] if c in df.columns), None)
-    col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq"] if c in df.columns), None)
-    col_desc  = next((c for c in ["Descricao_Peca", "Descricao", "descricao"] if c in df.columns), col_cod)
-
+    col_cod   = next((c for c in ["Codigo", "Produto"] if c in df.columns), None)
+    col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_"] if c in df.columns), None)
+    col_desc  = next((c for c in ["Descricao_Peca", "Descricao"] if c in df.columns), col_cod)
     if not col_cod or not col_valor:
         return pd.DataFrame(columns=_cols)
-
     df = df.copy()
     df["_cod"]   = df[col_cod].astype(str)
     df["_valor"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
     df["_desc"]  = df[col_desc].astype(str) if col_desc else df["_cod"]
-
-    agg = {"Valor_Total": ("_valor", "sum"), "Descricao_Peca": ("_desc", "first")}
-    grp = df.groupby("_cod").agg(**agg).reset_index().rename(columns={"_cod": "Codigo"})
+    grp = df.groupby("_cod").agg(Valor_Total=("_valor","sum"), Descricao_Peca=("_desc","first")).reset_index().rename(columns={"_cod":"Codigo"})
     grp = grp[grp["Valor_Total"] > 0].sort_values("Valor_Total", ascending=False).reset_index(drop=True)
     if grp.empty:
         return pd.DataFrame(columns=_cols)
-
-    total           = grp["Valor_Total"].sum()
+    total = grp["Valor_Total"].sum()
     grp["Pct"]      = grp["Valor_Total"] / total * 100
     grp["Pct_Acum"] = grp["Pct"].cumsum()
-    grp["Curva"]    = grp["Pct_Acum"].apply(
-        lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C")
-    )
+    grp["Curva"]    = grp["Pct_Acum"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
     return grp.head(top_n).reset_index(drop=True)
 
 
 def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
-    col_cli = next((c for c in ["Cliente_Revenda", "Cliente", "cliente", "Revenda"] if c in df.columns), None)
-    col_val = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq"] if c in df.columns), None)
+    col_cli = next((c for c in ["Cliente_Revenda", "Cliente"] if c in df.columns), None)
+    col_val = next((c for c in ["Valor_Total", "Vlr_Liq_"] if c in df.columns), None)
     if not col_cli or not col_val:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
     df = df.copy()
     df["Cliente_Revenda"] = df[col_cli].astype(str)
     df["Valor_Total"]     = pd.to_numeric(df[col_val], errors="coerce").fillna(0)
     top = df.groupby("Cliente_Revenda")["Valor_Total"].sum().reset_index()
-    top = top[
-        top["Cliente_Revenda"].notna() &
-        (~top["Cliente_Revenda"].astype(str).str.strip().isin(
-            ["", "nan", "Não informado", "Nao informado", "N/A", "NA", "-", "—"]
-        ))
-    ]
-    top = top[top["Valor_Total"] > 0]
-    return top.sort_values("Valor_Total", ascending=False).head(10).reset_index(drop=True)
+    top = top[~top["Cliente_Revenda"].isin(["nan","","Não informado","N/A","-"])]
+    return top[top["Valor_Total"] > 0].sort_values("Valor_Total", ascending=False).head(10).reset_index(drop=True)
 
 
-def calcular_abc_por_revenda(
-    df,
-    top_n_revendas=20,
-    lead_time_dias=15,
-    data_ini_filtro=None,
-    data_fim_filtro=None,
-):
-    import numpy as _np
-
+def calcular_abc_por_revenda(df, top_n_revendas=20, lead_time_dias=15,
+                              data_ini_filtro=None, data_fim_filtro=None):
     if df is None or df.empty:
         return pd.DataFrame(), 0, "", ""
-
-    col_cli   = next((c for c in ["Cliente_Revenda", "Cliente", "cliente"] if c in df.columns), None)
-    col_cod   = next((c for c in ["Codigo", "Produto", "produto", "codigo"] if c in df.columns), None)
-    col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_", "vlr_liq"] if c in df.columns), None)
-    col_qtd   = next((c for c in ["Quantidade", "Qtde_Fat_", "qtde_fat"] if c in df.columns), None)
-    col_desc  = next((c for c in ["Descricao_Peca", "Descricao"] if c in df.columns), col_cod)
-    col_data  = next((c for c in ["Data_Venda", "Emissao", "emissao"] if c in df.columns), None)
-
+    col_cli   = next((c for c in ["Cliente_Revenda","Cliente"] if c in df.columns), None)
+    col_cod   = next((c for c in ["Codigo","Produto"] if c in df.columns), None)
+    col_valor = next((c for c in ["Valor_Total","Vlr_Liq_"] if c in df.columns), None)
+    col_qtd   = next((c for c in ["Quantidade","Qtde_Fat_"] if c in df.columns), None)
+    col_desc  = next((c for c in ["Descricao_Peca","Descricao"] if c in df.columns), col_cod)
+    col_data  = next((c for c in ["Data_Venda","Emissao"] if c in df.columns), None)
     if not col_cli or not col_cod or not col_valor:
         return pd.DataFrame(), 0, "", ""
-
     df = df.copy()
     df["_cli"]   = df[col_cli].astype(str).str.strip()
     df["_cod"]   = df[col_cod].astype(str).str.strip()
     df["_valor"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
     df["_qtd"]   = pd.to_numeric(df[col_qtd],   errors="coerce").fillna(0) if col_qtd else 0
     df["_desc"]  = df[col_desc].astype(str) if col_desc else df["_cod"]
-
     ini_str = fim_str = "—"
     dias_periodo = 365
-
     if col_data:
         df["_data"] = pd.to_datetime(df[col_data], errors="coerce", dayfirst=True)
         if data_ini_filtro:
@@ -467,46 +415,31 @@ def calcular_abc_por_revenda(
         dias_periodo = max((d_fim - d_ini).days, 1)
         ini_str = d_ini.strftime("%d/%m/%Y")
         fim_str = d_fim.strftime("%d/%m/%Y")
-
-    top_revendas = (
-        df.groupby("_cli")["_valor"].sum()
-        .nlargest(top_n_revendas).index.tolist()
-    )
-
+    top_revendas = df.groupby("_cli")["_valor"].sum().nlargest(top_n_revendas).index.tolist()
     resultados = []
     for revenda in top_revendas:
         df_rev = df[df["_cli"] == revenda].copy()
         grp = df_rev.groupby("_cod").agg(
-            Descricao_Peca=("_desc", "first"),
-            Valor_Total=("_valor", "sum"),
-            Quantidade=("_qtd", "sum"),
-        ).reset_index().rename(columns={"_cod": "Codigo"})
-
-        if grp.empty:
+            Descricao_Peca=("_desc","first"), Valor_Total=("_valor","sum"), Quantidade=("_qtd","sum")
+        ).reset_index().rename(columns={"_cod":"Codigo"})
+        if grp.empty or grp["Valor_Total"].sum() == 0:
             continue
         total_rev = grp["Valor_Total"].sum()
-        if total_rev == 0:
-            continue
-
         grp = grp.sort_values("Valor_Total", ascending=False)
         grp["Pct"]      = grp["Valor_Total"] / total_rev * 100
         grp["Pct_Acum"] = grp["Pct"].cumsum()
-        grp["Curva"]    = grp["Pct_Acum"].apply(
-            lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C")
-        )
+        grp["Curva"]    = grp["Pct_Acum"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
         grp["Media_Diaria"] = grp["Quantidade"] / dias_periodo
         grp["Estoque_Minimo_Sugerido"] = grp["Media_Diaria"].apply(
             lambda x: max(round(x * lead_time_dias, 1), 1.0) if x > 0 else 0.0
         )
         grp["Cliente_Revenda"] = revenda
         resultados.append(grp)
-
     if not resultados:
         return pd.DataFrame(), dias_periodo, ini_str, fim_str
-
     df_final = pd.concat(resultados, ignore_index=True)[[
-        "Cliente_Revenda", "Codigo", "Descricao_Peca",
-        "Valor_Total", "Quantidade", "Pct", "Pct_Acum", "Curva",
-        "Media_Diaria", "Estoque_Minimo_Sugerido",
+        "Cliente_Revenda","Codigo","Descricao_Peca",
+        "Valor_Total","Quantidade","Pct","Pct_Acum","Curva",
+        "Media_Diaria","Estoque_Minimo_Sugerido",
     ]]
     return df_final, dias_periodo, ini_str, fim_str
