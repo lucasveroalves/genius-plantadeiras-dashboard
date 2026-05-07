@@ -345,7 +345,7 @@ def _construir_mapa(df_terr: pd.DataFrame):
             # Linha ligando as duas
             fig.add_trace(go.Scattermapbox(
                 lat=list(lats_a), lon=list(lons_a), mode="lines",
-                line=dict(width=2, color=border, dash="dot"),
+                line=dict(width=2, color=border),
                 showlegend=False, hoverinfo="skip",
             ))
             continue
