@@ -297,19 +297,78 @@ def _construir_mapa(df_terr: pd.DataFrame):
     revendas = df_map["Revenda"].unique().tolist()
     color_map = {r: _CORES[i % len(_CORES)] for i, r in enumerate(revendas)}
 
-    # Linhas conectando cidades da mesma revenda
+    # ── Polígonos preenchidos por revenda ────────────────────
+    import math as _math
+
+    def _hex_to_rgba(hex_cor: str, alpha: float) -> str:
+        hex_cor = hex_cor.lstrip("#")
+        r, g, b = int(hex_cor[0:2],16), int(hex_cor[2:4],16), int(hex_cor[4:6],16)
+        return f"rgba({r},{g},{b},{alpha})"
+
+    def _circulo(lat_c, lon_c, raio_km=55, n=40):
+        """Gera lista de lat/lon formando um círculo."""
+        r_lat = raio_km / 111.0
+        r_lon = raio_km / (111.0 * _math.cos(_math.radians(lat_c)))
+        lats = [lat_c + r_lat * _math.sin(2*_math.pi*i/n) for i in range(n+1)]
+        lons = [lon_c + r_lon * _math.cos(2*_math.pi*i/n) for i in range(n+1)]
+        return lats, lons
+
+    try:
+        from scipy.spatial import ConvexHull
+        import numpy as _np
+        _scipy_ok = True
+    except ImportError:
+        _scipy_ok = False
+
     for revenda in revendas:
-        df_r = df_map[df_map["Revenda"] == revenda]
-        if len(df_r) < 2:
+        df_r   = df_map[df_map["Revenda"] == revenda]
+        cor    = color_map[revenda]
+        fill   = _hex_to_rgba(cor, 0.14)
+        border = _hex_to_rgba(cor, 0.80)
+        lats_a = df_r["lat"].values
+        lons_a = df_r["lon"].values
+
+        if len(df_r) == 1:
+            # 1 cidade → círculo de ~55km
+            h_lats, h_lons = _circulo(lats_a[0], lons_a[0])
+        elif len(df_r) == 2:
+            # 2 cidades → círculos individuais + linha ligando
+            h_lats1, h_lons1 = _circulo(lats_a[0], lons_a[0], 45)
+            h_lats2, h_lons2 = _circulo(lats_a[1], lons_a[1], 45)
+            for hl, hlo in [(h_lats1, h_lons1), (h_lats2, h_lons2)]:
+                fig.add_trace(go.Scattermapbox(
+                    lat=hl, lon=hlo, mode="lines",
+                    fill="toself", fillcolor=fill,
+                    line=dict(width=1.5, color=border),
+                    showlegend=False, hoverinfo="skip",
+                ))
+            # Linha ligando as duas
+            fig.add_trace(go.Scattermapbox(
+                lat=list(lats_a), lon=list(lons_a), mode="lines",
+                line=dict(width=2, color=border, dash="dot"),
+                showlegend=False, hoverinfo="skip",
+            ))
             continue
-        lats, lons = [], []
-        for _, pt in df_r.iterrows():
-            lats += [pt["lat"], None]
-            lons += [pt["lon"], None]
-        cor = color_map[revenda]
+        else:
+            # 3+ cidades → convex hull
+            if _scipy_ok:
+                try:
+                    pts  = _np.column_stack([lons_a, lats_a])
+                    hull = ConvexHull(pts)
+                    idxs = list(hull.vertices) + [hull.vertices[0]]
+                    h_lons = [pts[v,0] for v in idxs]
+                    h_lats = [pts[v,1] for v in idxs]
+                except Exception:
+                    h_lats = list(lats_a) + [lats_a[0]]
+                    h_lons = list(lons_a) + [lons_a[0]]
+            else:
+                h_lats = list(lats_a) + [lats_a[0]]
+                h_lons = list(lons_a) + [lons_a[0]]
+
         fig.add_trace(go.Scattermapbox(
-            lat=lats, lon=lons, mode="lines",
-            line=dict(width=1.5, color=cor), opacity=0.3,
+            lat=h_lats, lon=h_lons, mode="lines",
+            fill="toself", fillcolor=fill,
+            line=dict(width=2, color=border),
             showlegend=False, hoverinfo="skip",
         ))
 
