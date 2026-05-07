@@ -1,13 +1,12 @@
 """
-app.py — Genius Implementos Agrícolas v16 (AUDITORIA)
+app.py — Genius Implementos Agrícolas v17
 
-Correções aplicadas:
-  [FIX-APP-1]  Adicionada função _render_abc_por_revenda() que estava sendo chamada
-               mas nunca definida — causava NameError em produção.
-  [FIX-WHITE-1] CSS whitelabel mantido.
-  [FIX-DATE]   Filtro de data totalmente livre sem travar nas datas mínima/máxima do df.
-  [DB-MIGR]    Importação para Supabase com progress bar (via db.py v16).
-  [EST-MIN]    Sub-aba Estoque Mínimo mantida.
+Alterações v17:
+  [V17-1]  Removida aba PCP (⚙️ PCP) — módulo descontinuado por solicitação.
+  [V17-2]  Formulário de Revendas agora sincroniza automaticamente com Territórios
+           (cidades de atuação entram no mapa ao cadastrar revenda).
+  [V17-3]  Export Excel adicionado em todos os módulos principais.
+  [V17-4]  clear_on_submit=True garantido em todos os formulários.
 """
 
 import streamlit as st
@@ -25,7 +24,6 @@ from components.ui import (
     render_banner_mock_pecas, render_auto_refresh,
 )
 from components.estoque      import render_aba_estoque
-from components.producao     import render_aba_pcp
 from components.forms        import (
     render_formulario_negociacao,
     render_formulario_orcamento_pecas,
@@ -46,7 +44,7 @@ except ImportError:
 from charts.plots            import grafico_curva_abc, grafico_ranking_revendas_pecas, grafico_top_produtos
 
 # ══════════════════════════════════════════════════════════════
-# PAGE CONFIG  (deve ser a PRIMEIRA chamada Streamlit)
+# PAGE CONFIG
 # ══════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="Genius Implementos Agrícolas",
@@ -126,7 +124,6 @@ if _peca_file is not None:
 
 df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
 
-# Enriquece df_pecas com descrições do catálogo
 if not df_pecas.empty and not is_mock_pecas:
     df_cat_desc = ler_catalogo_pecas()
     if not df_cat_desc.empty:
@@ -159,29 +156,20 @@ def _filtrar_pecas_por_perfil(df: pd.DataFrame, perfil: str) -> pd.DataFrame:
 
 
 def _calcular_estoque_minimo(df: pd.DataFrame, lead_time_dias: int = 15) -> pd.DataFrame:
-    """
-    Calcula estoque mínimo por (Peça × Revenda) usando Pandas puro.
-    Fórmula: estoque_minimo = media_vendas_diarias × lead_time_dias
-    """
     if df is None or df.empty:
         return pd.DataFrame()
-
     colunas_necessarias = {"Data_Venda", "Codigo_Peca", "Quantidade", "Revenda"}
     if not colunas_necessarias.issubset(df.columns):
         return pd.DataFrame()
-
     df = df.copy()
     df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce", dayfirst=True)
     df = df.dropna(subset=["Data_Venda", "Codigo_Peca", "Quantidade"])
     df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0)
-
     if df.empty:
         return pd.DataFrame()
-
     data_ini = df["Data_Venda"].min()
     data_fim = df["Data_Venda"].max()
     dias_periodo = max((data_fim - data_ini).days, 1)
-
     grp = (
         df.groupby(["Codigo_Peca", "Revenda"], as_index=False)
         .agg(
@@ -189,53 +177,26 @@ def _calcular_estoque_minimo(df: pd.DataFrame, lead_time_dias: int = 15) -> pd.D
             Total_Vendido=("Quantidade", "sum"),
         )
     )
-
     grp["Media_Diaria"]            = grp["Total_Vendido"] / dias_periodo
     grp["Estoque_Minimo_Sugerido"] = (grp["Media_Diaria"] * lead_time_dias).round(1)
-
     if "Estoque_Atual" in df.columns:
-        est_atual = (
-            df.groupby(["Codigo_Peca", "Revenda"])["Estoque_Atual"]
-            .last()
-            .reset_index()
-        )
+        est_atual = df.groupby(["Codigo_Peca", "Revenda"])["Estoque_Atual"].last().reset_index()
         grp = grp.merge(est_atual, on=["Codigo_Peca", "Revenda"], how="left")
         grp["Estoque_Atual"] = pd.to_numeric(grp["Estoque_Atual"], errors="coerce").fillna(0)
     else:
         grp["Estoque_Atual"] = 0.0
-
     grp["Abaixo_Minimo"] = grp["Estoque_Atual"] < grp["Estoque_Minimo_Sugerido"]
-    grp = grp.sort_values(
-        ["Abaixo_Minimo", "Total_Vendido"],
-        ascending=[False, False],
-    ).reset_index(drop=True)
-
+    grp = grp.sort_values(["Abaixo_Minimo", "Total_Vendido"], ascending=[False, False]).reset_index(drop=True)
     return grp
 
 
-# ══════════════════════════════════════════════════════════════
-# [FIX-APP-1]  _render_abc_por_revenda — função que estava FALTANDO
-#              Causa original: NameError ao abrir a aba Peças
-# ══════════════════════════════════════════════════════════════
-
 def _render_abc_por_revenda(df: pd.DataFrame):
-    """
-    Renderiza análise ABC por revenda com estoque mínimo sugerido.
-    Chamada no final de _render_aba_pecas() para o perfil comercial.
-    """
     st.subheader("📊 ABC por Revenda — Estoque Mínimo Sugerido")
-
     col_lt, col_top, col_btn = st.columns([2, 2, 1])
     with col_lt:
-        lead_time = st.number_input(
-            "Lead Time (dias)", min_value=1, max_value=90, value=15, step=1,
-            key="abc_rev_lead", help="Dias para reposição de estoque.",
-        )
+        lead_time = st.number_input("Lead Time (dias)", min_value=1, max_value=90, value=15, step=1, key="abc_rev_lead")
     with col_top:
-        top_n = st.number_input(
-            "Top N revendas", min_value=1, max_value=50, value=10, step=1,
-            key="abc_rev_topn",
-        )
+        top_n = st.number_input("Top N revendas", min_value=1, max_value=50, value=10, step=1, key="abc_rev_topn")
     with col_btn:
         st.write("")
         calcular = st.button("⚙️ Calcular", key="btn_abc_rev", type="primary")
@@ -246,11 +207,7 @@ def _render_abc_por_revenda(df: pd.DataFrame):
 
     if calcular or "df_abc_rev_cache" not in st.session_state:
         with st.spinner("Calculando ABC por revenda..."):
-            df_result, dias, ini_str, fim_str = calcular_abc_por_revenda(
-                df,
-                top_n_revendas=int(top_n),
-                lead_time_dias=int(lead_time),
-            )
+            df_result, dias, ini_str, fim_str = calcular_abc_por_revenda(df, top_n_revendas=int(top_n), lead_time_dias=int(lead_time))
             st.session_state["df_abc_rev_cache"] = df_result
             st.session_state["df_abc_rev_meta"]  = (dias, ini_str, fim_str)
 
@@ -258,59 +215,24 @@ def _render_abc_por_revenda(df: pd.DataFrame):
     dias, ini_str, fim_str = st.session_state.get("df_abc_rev_meta", (0, "—", "—"))
 
     if df_result is None or df_result.empty:
-        st.warning("⚠️ Sem dados suficientes para calcular. Verifique se há peças carregadas.")
+        st.warning("⚠️ Sem dados suficientes para calcular.")
         return
 
     st.caption(f"Período: {ini_str} → {fim_str}  |  {dias} dias  |  Lead time: {int(lead_time)} dias")
-
-    # Filtro por revenda
     revendas_disponiveis = sorted(df_result["Cliente_Revenda"].unique().tolist())
-    rev_sel = st.selectbox(
-        "Filtrar por revenda", ["Todas"] + revendas_disponiveis,
-        key="abc_rev_sel",
-    )
+    rev_sel = st.selectbox("Filtrar por revenda", ["Todas"] + revendas_disponiveis, key="abc_rev_sel")
     df_show = df_result if rev_sel == "Todas" else df_result[df_result["Cliente_Revenda"] == rev_sel]
 
-    # Métricas rápidas
     k1, k2, k3 = st.columns(3)
     k1.metric("📦 Combinações", f"{len(df_show):,}".replace(",", "."))
     k2.metric("🟠 Classe A",    f"{(df_show['Curva'] == 'A').sum():,}".replace(",", "."))
-    k3.metric("⚡ Sem cobertura",
-              f"{(df_show['Estoque_Minimo_Sugerido'] == 0).sum():,}".replace(",", "."))
+    k3.metric("⚡ Sem cobertura", f"{(df_show['Estoque_Minimo_Sugerido'] == 0).sum():,}".replace(",", "."))
 
-    def _brl(v):
-        try:
-            return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        except Exception:
-            return "—"
+    cols_show = [c for c in ["Cliente_Revenda", "Codigo", "Descricao_Peca", "Valor_Total", "Quantidade", "Curva", "Media_Diaria", "Estoque_Minimo_Sugerido"] if c in df_show.columns]
+    st.dataframe(df_show[cols_show].style.format({"Valor_Total": "{:,.2f}", "Quantidade": "{:,.0f}", "Media_Diaria": "{:.3f}", "Estoque_Minimo_Sugerido": "{:.1f}"}), use_container_width=True, height=500)
 
-    # Tabela
-    cols_show = [c for c in [
-        "Cliente_Revenda", "Codigo", "Descricao_Peca",
-        "Valor_Total", "Quantidade", "Curva",
-        "Media_Diaria", "Estoque_Minimo_Sugerido",
-    ] if c in df_show.columns]
-
-    st.dataframe(
-        df_show[cols_show].style.format({
-            "Valor_Total":             "{:,.2f}",
-            "Quantidade":              "{:,.0f}",
-            "Media_Diaria":            "{:.3f}",
-            "Estoque_Minimo_Sugerido": "{:.1f}",
-        }),
-        use_container_width=True,
-        height=500,
-    )
-
-    # Download
     csv_bytes = df_show[cols_show].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-    st.download_button(
-        "📥 Exportar ABC por Revenda (.csv)",
-        data=csv_bytes,
-        file_name=f"abc_por_revenda_lead{int(lead_time)}d.csv",
-        mime="text/csv",
-        key="dl_abc_rev",
-    )
+    st.download_button("📥 Exportar ABC por Revenda (.csv)", data=csv_bytes, file_name=f"abc_por_revenda_lead{int(lead_time)}d.csv", mime="text/csv", key="dl_abc_rev")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -319,22 +241,17 @@ def _render_abc_por_revenda(df: pd.DataFrame):
 
 def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
     perfil = st.session_state.get("perfil_atual", "comercial")
-
     if is_mock_pecas_arg:
         render_banner_mock_pecas()
         return
 
     st.header("🔧 Análise de Peças")
-
-    # Filtro de Período Dinâmico
     hoje = date.today()
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
-    default_ini = date(2020, 1, 1)
-    default_fim = hoje
     with col_f1:
-        d0 = st.date_input("De",   value=default_ini, format="DD/MM/YYYY", key="peca_d0")
+        d0 = st.date_input("De",  value=date(2020, 1, 1), format="DD/MM/YYYY", key="peca_d0")
     with col_f2:
-        d1 = st.date_input("Até",  value=default_fim, format="DD/MM/YYYY", key="peca_d1")
+        d1 = st.date_input("Até", value=hoje, format="DD/MM/YYYY", key="peca_d1")
     with col_f3:
         st.write("")
         st.write("")
@@ -350,8 +267,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         df_filtrado = df_pecas_arg
 
     df_para_calculos = _filtrar_pecas_por_perfil(df_filtrado, perfil)
-
-    # Orçamentos
     df_orc = ler_orcamentos()
     orc_faturados  = 0.0
     orc_aguardando = 0.0
@@ -359,7 +274,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         orc_faturados  = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"] == "Faturado",  "Valor_Total"], errors="coerce").fillna(0).sum()
         orc_aguardando = pd.to_numeric(df_orc.loc[df_orc["Status_Orc"] == "Aguardando","Valor_Total"], errors="coerce").fillna(0).sum()
 
-    # KPIs
     if perfil == "comercial":
         kpis = calcular_kpis_pecas(df_filtrado, df_orc)
     else:
@@ -398,7 +312,6 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         with c2: _card("🏷️ SKUs Ativos",     str(kpis["qtd_skus"]))
         st.divider()
 
-    # Curva ABC
     df_orc_para_abc = pd.DataFrame()
     if not df_orc.empty and "Status_Orc" in df_orc.columns:
         df_fat_orc = df_orc[df_orc["Status_Orc"] == "Faturado"].copy()
@@ -423,10 +336,7 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
                 "Quantidade":      pd.to_numeric(df_lanc_fat.get("Quantidade",   pd.Series(dtype=float)), errors="coerce").fillna(0),
             })
 
-    df_para_calculos_enriquecido = pd.concat(
-        [df_para_calculos, df_orc_para_abc, df_lanc_para_abc],
-        ignore_index=True,
-    )
+    df_para_calculos_enriquecido = pd.concat([df_para_calculos, df_orc_para_abc, df_lanc_para_abc], ignore_index=True)
     df_abc          = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=20)
     df_abc_completo = calcular_curva_abc_por_codigo(df_para_calculos_enriquecido, top_n=99999)
 
@@ -465,141 +375,18 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         else:
             st.info("Sem dados para Curva ABC.")
 
-        if not df_orc.empty and "Status_Orc" in df_orc.columns:
-            st.divider()
-            st.subheader("📋 Orçamentos de Peças em Aberto")
-            df_orc_view = df_orc[df_orc["Status_Orc"] == "Aguardando"][[
-                "Nr_Pedido", "Data_Orcamento", "Cliente_Revenda", "Valor_Total", "Status_Orc"
-            ]]
-            st.dataframe(df_orc_view, use_container_width=True, height=300)
-
     if perfil == "comercial":
         st.divider()
-        # [FIX-APP-1] Função agora definida — sem mais NameError
         _render_abc_por_revenda(df_filtrado)
 
 
 # ══════════════════════════════════════════════════════════════
-# Sub-aba: Estoque Mínimo por Revenda
-# ══════════════════════════════════════════════════════════════
-
-def _render_estoque_minimo(df: pd.DataFrame):
-    st.markdown("""
-<div style="display:flex;align-items:center;gap:14px;padding:10px 0 18px;
-            border-bottom:1px solid #2D3748;margin-bottom:20px;">
-  <div style="background:rgba(52,183,120,.13);border:1px solid rgba(52,183,120,.4);
-              border-radius:10px;padding:10px 14px;font-size:22px;">📐</div>
-  <div>
-    <div style="font-family:'Barlow Condensed',sans-serif;font-size:1.7rem;
-                font-weight:700;color:#F0F4F8;line-height:1.1;">
-      Estoque Mínimo por Revenda</div>
-    <div style="font-size:12px;color:#6A7A8A;text-transform:uppercase;
-                letter-spacing:.07em;margin-top:4px;">
-      Fórmula: Média de Vendas Diárias × Lead Time (dias) · Sem IA · Pandas puro</div>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    col_lt, col_btn = st.columns([2, 1])
-    with col_lt:
-        lead_time = st.number_input(
-            "Lead Time (dias)", min_value=1, max_value=90,
-            value=15, step=1, key="est_min_lead",
-            help="Quantidade de dias que leva para reabastecer o estoque.",
-        )
-    with col_btn:
-        st.write("")
-        calcular = st.button("⚙️ Calcular", key="btn_calcular_estmin", type="primary")
-
-    if not calcular and "df_estmin_cache" not in st.session_state:
-        st.info("Clique em **Calcular** para gerar a análise de estoque mínimo.")
-        return
-
-    with st.spinner("Calculando estoque mínimo..."):
-        df_estmin = _calcular_estoque_minimo(df, lead_time_dias=int(lead_time))
-        st.session_state["df_estmin_cache"] = df_estmin
-
-    df_estmin = st.session_state.get("df_estmin_cache", pd.DataFrame())
-
-    if df_estmin.empty:
-        st.warning("⚠️ Não foi possível calcular. Verifique se o DataFrame contém as colunas: "
-                   "`Data_Venda`, `Codigo_Peca`, `Quantidade`, `Revenda`.")
-        return
-
-    total_itens  = len(df_estmin)
-    abaixo_count = int(df_estmin["Abaixo_Minimo"].sum())
-    pct_critico  = (abaixo_count / total_itens * 100) if total_itens else 0
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("📦 Combinações Peça × Revenda", f"{total_itens:,}".replace(",", "."))
-    k2.metric("🔴 Abaixo do Mínimo",           f"{abaixo_count:,}".replace(",", "."))
-    k3.metric("⚠️ % Crítico",                  f"{pct_critico:.1f}%")
-
-    st.divider()
-
-    col_f1, col_f2 = st.columns([3, 1])
-    with col_f1:
-        busca = st.text_input("🔍 Filtrar por peça ou revenda", key="est_min_busca",
-                               placeholder="Ex: 123456 ou Revenda João")
-    with col_f2:
-        apenas_criticos = st.checkbox("Mostrar só críticos 🔴", key="est_min_criticos")
-
-    df_show = df_estmin.copy()
-    if apenas_criticos:
-        df_show = df_show[df_show["Abaixo_Minimo"]]
-    if busca.strip():
-        mask = (
-            df_show["Codigo_Peca"].astype(str).str.contains(busca, case=False, na=False)
-            | df_show["Revenda"].astype(str).str.contains(busca, case=False, na=False)
-        )
-        df_show = df_show[mask]
-
-    def _highlight_critico(row):
-        cor = "background-color: rgba(232,64,64,.18); color: #E87878;" if row["Abaixo_Minimo"] else ""
-        return [cor] * len(row)
-
-    cols_exibir = [c for c in [
-        "Codigo_Peca", "Descricao", "Revenda",
-        "Total_Vendido", "Media_Diaria",
-        "Estoque_Minimo_Sugerido", "Estoque_Atual", "Abaixo_Minimo",
-    ] if c in df_show.columns]
-
-    styled = (
-        df_show[cols_exibir]
-        .style
-        .apply(_highlight_critico, axis=1)
-        .format({
-            "Total_Vendido":           "{:.0f}",
-            "Media_Diaria":            "{:.2f}",
-            "Estoque_Minimo_Sugerido": "{:.1f}",
-            "Estoque_Atual":           "{:.1f}",
-        })
-    )
-
-    st.dataframe(styled, use_container_width=True, height=500)
-    st.caption(
-        f"🔢 {len(df_show):,} linha(s) exibida(s) · "
-        f"Lead time: {int(lead_time)} dias · "
-        f"Fórmula: Estoque Mín. = Média Diária × {int(lead_time)}"
-    )
-
-    csv_bytes = df_show[cols_exibir].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-    st.download_button(
-        "📥 Exportar tabela (.csv)",
-        data=csv_bytes,
-        file_name=f"estoque_minimo_lead{int(lead_time)}d.csv",
-        mime="text/csv",
-        key="dl_estmin",
-    )
-
-
-# ══════════════════════════════════════════════════════════════
-# 5. Define abas visíveis para este usuário
+# 5. Define abas — PCP REMOVIDO [V17-1]
 # ══════════════════════════════════════════════════════════════
 MAPA = {
     "📝 Orçamento de Peças":   lambda: render_formulario_orcamento_pecas(),
     "🏬 Revendas":             lambda: render_formulario_revendas(),
     "🤝 Pipeline Máquinas":    lambda: render_aba_crm_maquinas(),
-    "⚙️ PCP":                  lambda: render_aba_pcp(),
     "📦 Estoque de Máquinas":  lambda: render_aba_estoque(),
     "📄 NF em Demonstração":   lambda: render_aba_nf_demo(),
     "🔧 Peças":                lambda df=df_pecas, mock=is_mock_pecas: _render_aba_pecas(df, mock),
@@ -609,12 +396,8 @@ MAPA = {
 permitidas = abas_permitidas()
 
 if not permitidas and st.session_state.get("autenticado"):
-    st.warning(
-        "⚠️ Sessão expirada ou permissões não carregadas. "
-        "Por favor, faça login novamente."
-    )
-    for k in ["autenticado", "usuario_atual", "perfil_atual",
-              "nome_usuario", "is_admin", "abas_permitidas", "login_time", "_sb_ok"]:
+    st.warning("⚠️ Sessão expirada ou permissões não carregadas. Por favor, faça login novamente.")
+    for k in ["autenticado", "usuario_atual", "perfil_atual", "nome_usuario", "is_admin", "abas_permitidas", "login_time", "_sb_ok"]:
         st.session_state.pop(k, None)
     st.rerun()
 
