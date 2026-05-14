@@ -80,10 +80,23 @@ def _get_status(row) -> str:
     return str(row.get("Status_Producao", row.get("Status", "Em Negociação")) or "Em Negociação")
 
 def _get_valor(row) -> float:
+    """Lê valor da coluna Valor (se existir) ou extrai [VALOR:xxx] das Observacoes."""
     try:
-        return float(row.get("Valor", row.get("Valor_Total", 0)) or 0)
+        v = row.get("Valor", None)
+        if v is not None and str(v).strip() not in ("", "None", "0"):
+            return float(v)
     except Exception:
-        return 0.0
+        pass
+    # Fallback: extrai do prefixo [VALOR:xxx] nas Observacoes
+    try:
+        import re
+        obs = str(row.get("Observacoes", "") or "")
+        m = re.search(r"\[VALOR:([\d.]+)\]", obs)
+        if m:
+            return float(m.group(1))
+    except Exception:
+        pass
+    return 0.0
 
 
 # ══════════════════════════════════════════════════════════════
@@ -191,6 +204,10 @@ def _form_nova_oportunidade():
                     if obs.strip():
                         hist += f" {obs.strip()}"
 
+                    # [V18-FIX] Valor embutido em Observacoes — coluna Valor nao existe no schema
+                    valor_str = f"[VALOR:{valor:.2f}]" if valor > 0 else ""
+                    hist_com_valor = (valor_str + " " + hist).strip()
+
                     reg = {
                         "Equipamento":           equip.strip(),
                         "Cliente":               cliente.strip(),
@@ -200,8 +217,7 @@ def _form_nova_oportunidade():
                         "Data_Entrega_Prevista": dt_fu.strftime("%d/%m/%Y") if dt_fu else "",
                         "Data_Entrega_Real":     "",
                         "Status_Producao":       "Em Negociação",
-                        "Valor":                 valor,
-                        "Observacoes":           hist,
+                        "Observacoes":           hist_com_valor,
                     }
                     if adicionar_producao(reg):
                         st.toast(f"✅ '{equip}' adicionado ao pipeline!", icon="✅")

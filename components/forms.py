@@ -86,18 +86,21 @@ def render_formulario_negociacao():
                 st.toast("⚠️ Valor deve ser maior que zero.", icon="🚫")
                 st.stop()
 
+            # [V18-FIX] Valor embutido nas Observacoes — coluna Valor nao existe no schema
+            valor_str = f"[VALOR:{valor:.2f}]" if valor > 0 else ""
+            obs_final = (valor_str + " " + observacoes.strip()).strip()
+
             reg = {
                 "Equipamento":           equipamento.strip(),
                 "Cliente":               cliente.strip(),
                 "Representante":         representante.strip(),
                 "Data_Pedido":           data_pedido.strftime("%d/%m/%Y"),
-                "Valor":                 valor,
                 "Status":                status_inicial,
                 "Status_Producao":       status_inicial,
                 "Data_Inicio_Producao":  data_inicio.strftime("%d/%m/%Y")  if data_inicio  else "",
                 "Data_Entrega_Prevista": data_entrega.strftime("%d/%m/%Y") if data_entrega else "",
                 "Data_Entrega_Real":     "",
-                "Observacoes":           observacoes.strip(),
+                "Observacoes":           obs_final,
             }
             if adicionar_producao(reg):
                 st.toast("✅ Orçamento de máquina salvo!", icon="✅")
