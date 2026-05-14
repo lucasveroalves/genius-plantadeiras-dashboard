@@ -13,7 +13,13 @@ Melhorias v17:
 """
 
 from __future__ import annotations
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+
+def _hoje_brt() -> str:
+    """Retorna data atual no fuso Brasil (UTC-3) formato DD/MM/YYYY."""
+    return datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y')
+
 from io import BytesIO
 import pandas as pd
 import streamlit as st
@@ -81,17 +87,16 @@ def _get_status(row) -> str:
 
 def _get_valor(row) -> float:
     """Lê valor da coluna Valor (se existir) ou extrai [VALOR:xxx] das Observacoes."""
+    import re as _re
     try:
         v = row.get("Valor", None)
-        if v is not None and str(v).strip() not in ("", "None", "0"):
+        if v is not None and str(v).strip() not in ("", "None", "0", "nan"):
             return float(v)
     except Exception:
         pass
-    # Fallback: extrai do prefixo [VALOR:xxx] nas Observacoes
     try:
-        import re
         obs = str(row.get("Observacoes", "") or "")
-        m = re.search(r"\[VALOR:([\d.]+)\]", obs)
+        m = _re.search(r"\[VALOR:([\d.]+)\]", obs)
         if m:
             return float(m.group(1))
     except Exception:
@@ -164,11 +169,18 @@ def _kpis(df: pd.DataFrame):
     conversao  = f"{n_fechados/n_finalizados*100:.0f}%" if n_finalizados > 0 else "—"
 
     c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("📋 Total",          n_total)
-    c2.metric("💰 Pipeline Ativo", _brl(pipeline))
-    c3.metric("✅ Fechados",        n_fechados)
-    c4.metric("❌ Declinados",      n_declin)
-    c5.metric("🎯 Conversão",       conversao)
+    c1.metric("📋 Total",      n_total)
+    # [V18-FIX] Pipeline Ativo usa markdown para não truncar valor longo
+    c2.markdown(
+        f'<div style="padding:4px 0;">'
+        f'<div style="font-size:11px;color:#6A7A8A;font-weight:600;">💰 PIPELINE ATIVO</div>'
+        f'<div style="font-size:1.4rem;font-weight:700;color:#F0F4F8;margin-top:4px;word-break:break-word;">{_brl(pipeline)}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    c3.metric("✅ Fechados",   n_fechados)
+    c4.metric("❌ Declinados", n_declin)
+    c5.metric("🎯 Conversão",  conversao)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -199,8 +211,10 @@ def _form_nova_oportunidade():
                     st.toast("⚠️ Cliente é obrigatório.", icon="🚫")
                 else:
                     valor = _parse_brl(valor_txt)
+                    from datetime import timezone, timedelta as _td
+                    _brt  = datetime.now(timezone(timedelta(hours=-3)))
                     autor = st.session_state.get("nome_usuario", "Sistema")
-                    hist  = f"[{date.today().strftime('%d/%m/%Y')} - {autor}] Oportunidade criada."
+                    hist  = f"[{_brt.strftime('%d/%m/%Y')} - {autor}] Oportunidade criada."
                     if obs.strip():
                         hist += f" {obs.strip()}"
 
@@ -399,13 +413,36 @@ def _lista_completa(df: pd.DataFrame):
         st.info("Nenhuma oportunidade encontrada com os filtros aplicados.")
         return
 
-    # Export [V17-CRM-4]
+    # Export [V18-FIX] Excel limpo — colunas traduzidas, Observacoes sem prefixo VALOR
+    import re as _re
     df_exp = df_show.copy()
-    df_exp["Status"] = df_exp.apply(_get_status, axis=1)
-    df_exp["Valor"]  = df_exp.apply(_get_valor, axis=1)
-    cols_exp = [c for c in ["Equipamento","Cliente","Representante","Valor","Status","Data_Pedido","Data_Entrega_Prevista","Observacoes"] if c in df_exp.columns]
+    df_exp["_Status"] = df_exp.apply(_get_status, axis=1)
+    df_exp["_Valor"]  = df_exp.apply(_get_valor, axis=1)
+    # Limpar Observacoes — remover prefixo [VALOR:xxx]
+    if "Observacoes" in df_exp.columns:
+        df_exp["_Obs"] = df_exp["Observacoes"].astype(str).apply(
+            lambda x: _re.sub(r"\[VALOR:[\d.]+\]\s*", "", x).strip()
+        )
+    else:
+        df_exp["_Obs"] = ""
+
+    df_export = pd.DataFrame({
+        "Equipamento / Modelo": df_exp.get("Equipamento", ""),
+        "Cliente / Revenda":    df_exp.get("Cliente", ""),
+        "Representante":        df_exp.get("Representante", ""),
+        "Valor Estimado (R$)":  df_exp["_Valor"],
+        "Status":               df_exp["_Status"],
+        "Data do Pedido":       df_exp.get("Data_Pedido", ""),
+        "Data Follow-up":       df_exp.get("Data_Entrega_Prevista", ""),
+        "Observações":          df_exp["_Obs"],
+    })
     buf = BytesIO()
-    df_exp[cols_exp].to_excel(buf, index=False)
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Pipeline")
+        ws = writer.sheets["Pipeline"]
+        for col in ws.columns:
+            max_len = max(len(str(col[0].value or "")), max((len(str(cell.value or "")) for cell in col[1:]), default=0))
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
     col_exp, col_count = st.columns([1, 3])
     col_exp.download_button("📥 Exportar Excel", data=buf.getvalue(),
                              file_name=f"pipeline_{date.today()}.xlsx",
@@ -485,12 +522,32 @@ def _historico_metricas(df: pd.DataFrame):
     c4.metric("🎟️ Ticket Médio",    _brl(ticket))
     c5.metric("🎯 Conversão",        conv)
 
-    # Export [V17-CRM-4]
+    # Export [V18-FIX] histórico limpo
+    import re as _re
     df_exp_h = df.copy()
-    df_exp_h["Status"] = df_exp_h.apply(_get_status, axis=1)
-    df_exp_h["Valor"]  = df_exp_h.apply(_get_valor, axis=1)
+    df_exp_h["_Status"] = df_exp_h.apply(_get_status, axis=1)
+    df_exp_h["_Valor"]  = df_exp_h.apply(_get_valor, axis=1)
+    df_exp_h["_Obs"] = df_exp_h.get("Observacoes", pd.Series(dtype=str)).astype(str).apply(
+        lambda x: _re.sub(r"\[VALOR:[\d.]+\]\s*", "", x).strip()
+    )
+    df_hist_export = pd.DataFrame({
+        "Equipamento / Modelo": df_exp_h.get("Equipamento", ""),
+        "Cliente / Revenda":    df_exp_h.get("Cliente", ""),
+        "Representante":        df_exp_h.get("Representante", ""),
+        "Valor Estimado (R$)":  df_exp_h["_Valor"],
+        "Status":               df_exp_h["_Status"],
+        "Data do Pedido":       df_exp_h.get("Data_Pedido", ""),
+        "Data Follow-up":       df_exp_h.get("Data_Entrega_Prevista", ""),
+        "Data Fechamento":      df_exp_h.get("Data_Entrega_Real", ""),
+        "Observações":          df_exp_h["_Obs"],
+    })
     buf = BytesIO()
-    df_exp_h.drop(columns=["id"], errors="ignore").to_excel(buf, index=False)
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_hist_export.to_excel(writer, index=False, sheet_name="Histórico Pipeline")
+        ws = writer.sheets["Histórico Pipeline"]
+        for col in ws.columns:
+            max_len = max(len(str(col[0].value or "")), max((len(str(cell.value or "")) for cell in col[1:]), default=0))
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
     st.download_button("📥 Exportar Histórico Completo (.xlsx)", data=buf.getvalue(),
                         file_name=f"historico_pipeline_{date.today()}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -571,9 +628,6 @@ def render_aba_crm_maquinas():
 </div>""", unsafe_allow_html=True)
 
     df = ler_producao()
-
-    # Follow-ups urgentes no topo [V17-CRM-3]
-    _painel_followups(df)
 
     # KPIs
     _kpis(df)
