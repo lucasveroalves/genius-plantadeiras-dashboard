@@ -278,18 +278,11 @@ def _pipeline_visual(df: pd.DataFrame):
         obs     = str(row.get("Observacoes", "") or "")
         dias_fu = _dias_followup(fu_str) if fu_str else None
 
-        # Badge de follow-up
-        if dias_fu is not None:
-            if dias_fu < 0:
-                fu_badge = f'<span class="crm-badge" style="background:rgba(232,64,64,.15);color:#E84040;">🔴 {abs(dias_fu)}d atraso</span>'
-            elif dias_fu == 0:
-                fu_badge = '<span class="crm-badge" style="background:rgba(232,64,64,.15);color:#E84040;">🔴 HOJE</span>'
-            elif dias_fu <= 3:
-                fu_badge = f'<span class="crm-badge" style="background:rgba(232,160,32,.15);color:#E8A020;">🟡 {dias_fu}d</span>'
-            else:
-                fu_badge = f'<span class="crm-badge" style="background:rgba(61,153,112,.12);color:#3D9970;">✅ {dias_fu}d</span>'
+        # Badge de follow-up — apenas mostra a data, sem alerta de atraso
+        if fu_str:
+            fu_badge = f'<span class="crm-badge" style="background:rgba(45,55,72,.5);color:#A8B8CC;">📅 Follow-up: {fu_str}</span>'
         else:
-            fu_badge = '<span class="crm-badge" style="background:rgba(45,55,72,.5);color:#6A7A8A;">Sem followup</span>'
+            fu_badge = '<span class="crm-badge" style="background:rgba(45,55,72,.5);color:#6A7A8A;">Sem follow-up definido</span>'
 
         # Última linha do histórico
         ultima_obs = obs.strip().split("\n")[-1][:100] if obs.strip() else ""
@@ -306,26 +299,27 @@ def _pipeline_visual(df: pd.DataFrame):
             unsafe_allow_html=True,
         )
 
-        # Ações
-        col_obs, col_fu, col_st, col_del = st.columns([2.5, 2, 2, 0.5])
+        # Ações — obs usa st.form com clear_on_submit para limpar após registrar
+        col_fu2, col_st, col_del = st.columns([2, 2, 0.5])
 
-        nova_obs = col_obs.text_input("", placeholder="Nova observação...",
-                                       key=f"obs_input_{row_id}", label_visibility="collapsed")
-        nova_fu  = col_fu.date_input("", value=None, format="DD/MM/YYYY",
-                                      key=f"fu_input_{row_id}", label_visibility="collapsed")
-
-        if col_obs.button("💬 Registrar obs.", key=f"reg_obs_{row_id}", use_container_width=True):
-            if nova_obs.strip():
-                autor = st.session_state.get("nome_usuario", "Sistema")
-                entrada = f"\n[{date.today().strftime('%d/%m/%Y')} - {autor}] {nova_obs.strip()}"
-                novo_hist = obs + entrada
-                atualizar_producao_campo(row_id, "Observacoes", novo_hist)
-                if nova_fu:
-                    atualizar_producao_campo(row_id, "Data_Entrega_Prevista", nova_fu.strftime("%d/%m/%Y"))
-                st.toast("✅ Observação registrada!", icon="✅")
-                st.rerun()
-            else:
-                st.toast("⚠️ Digite uma observação.", icon="🚫")
+        with st.form(key=f"form_obs_{row_id}", clear_on_submit=True):
+            fc1, fc2 = st.columns([3, 1])
+            nova_obs = fc1.text_input("", placeholder="Nova observação...",
+                                      label_visibility="collapsed")
+            nova_fu  = fc2.date_input("", value=None, format="DD/MM/YYYY",
+                                      label_visibility="collapsed")
+            if st.form_submit_button("💬 Registrar obs.", use_container_width=True, type="primary"):
+                if nova_obs.strip():
+                    autor = st.session_state.get("nome_usuario", "Sistema")
+                    entrada = f"\n[{_hoje_brt()} - {autor}] {nova_obs.strip()}"
+                    novo_hist = obs + entrada
+                    atualizar_producao_campo(row_id, "Observacoes", novo_hist)
+                    if nova_fu:
+                        atualizar_producao_campo(row_id, "Data_Entrega_Prevista", nova_fu.strftime("%d/%m/%Y"))
+                    st.toast("✅ Observação registrada!", icon="✅")
+                    st.rerun()
+                else:
+                    st.toast("⚠️ Digite uma observação.", icon="🚫")
 
         novo_st = col_st.selectbox("", STATUS, index=0,
                                     key=f"st_{row_id}", label_visibility="collapsed")
@@ -516,11 +510,16 @@ def _historico_metricas(df: pd.DataFrame):
     conv   = f"{len(fechados)/n_fin*100:.0f}%" if n_fin > 0 else "—"
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("💰 Total Fechado",   _brl(val_fechados))
-    c2.metric("🔄 Em Negociação",   _brl(val_ativos))
-    c3.metric("💸 Total Declinado", _brl(val_declinados))
-    c4.metric("🎟️ Ticket Médio",    _brl(ticket))
-    c5.metric("🎯 Conversão",        conv)
+    def _kpi_card(col, label, valor_str):
+        col.markdown(
+            f'<div style="padding:4px 0;">'            f'<div style="font-size:11px;color:#6A7A8A;font-weight:600;">{label}</div>'            f'<div style="font-size:1.25rem;font-weight:700;color:#F0F4F8;margin-top:4px;word-break:break-word;">{valor_str}</div>'            f'</div>',
+            unsafe_allow_html=True,
+        )
+    _kpi_card(c1, "💰 TOTAL FECHADO",   _brl(val_fechados))
+    _kpi_card(c2, "🔄 EM NEGOCIAÇÃO",   _brl(val_ativos))
+    _kpi_card(c3, "💸 TOTAL DECLINADO", _brl(val_declinados))
+    _kpi_card(c4, "🎟️ TICKET MÉDIO",    _brl(ticket))
+    _kpi_card(c5, "🎯 CONVERSÃO",        conv)
 
     # Export [V18-FIX] histórico limpo
     import re as _re
