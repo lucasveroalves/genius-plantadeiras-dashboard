@@ -77,7 +77,7 @@ if not tela_login():
 # 2. Sidebar
 # ══════════════════════════════════════════════════════════════
 painel_usuario()
-_peca_file, _catalogo_file = render_sidebar_uploads()
+_peca_file, _devolucao_file, _catalogo_file = render_sidebar_uploads()
 
 # ══════════════════════════════════════════════════════════════
 # 3. Dados de Peças
@@ -122,7 +122,7 @@ if _peca_file is not None:
             except Exception as _e:
                 st.sidebar.error(f"❌ Erro inesperado: {_e}")
 
-df_pecas, is_mock_pecas = preparar_pecas(_peca_file)
+df_pecas, is_mock_pecas = preparar_pecas(_peca_file, _catalogo_file, _devolucao_file)
 
 if not df_pecas.empty and not is_mock_pecas:
     df_cat_desc = ler_catalogo_pecas()
@@ -298,13 +298,17 @@ def _render_aba_pecas(df_pecas_arg, is_mock_pecas_arg):
         )
 
     if perfil == "comercial":
-        c1, c2, c3, c4, c5 = st.columns(5)
-        total_com_orc = kpis["total_faturado"] + orc_faturados
-        with c1: _card("💰 Total Faturado",  _brl(total_com_orc))
-        with c2: _card("⏳ Orc. Aguardando", _brl(orc_aguardando))
-        with c3: _card("📦 Volume de Itens",  f"{int(kpis['volume_itens']):,}".replace(",", "."))
-        with c4: _card("🎟️ Ticket Médio",     _brl(kpis["ticket_medio"]))
-        with c5: _card("🏷️ SKUs Ativos",      str(kpis["qtd_skus"]))
+        # Linha 1: Bruto / Devolução / Líquido
+        c1, c2, c3 = st.columns(3)
+        with c1: _card("📈 Fat. Bruto",    _brl(kpis.get("fat_bruto", kpis["total_faturado"])))
+        with c2: _card("📉 Devolução",     _brl(kpis.get("fat_devolucao", 0.0)))
+        with c3: _card("💰 Fat. Líquido",  _brl(kpis.get("fat_liquido", kpis["total_faturado"])))
+        # Linha 2: demais KPIs
+        c4, c5, c6, c7 = st.columns(4)
+        with c4: _card("⏳ Orc. Aguardando", _brl(orc_aguardando))
+        with c5: _card("📦 Volume de Itens",  f"{int(kpis['volume_itens']):,}".replace(",", "."))
+        with c6: _card("🎟️ Ticket Médio",     _brl(kpis["ticket_medio"]))
+        with c7: _card("🏷️ SKUs Ativos",      str(kpis["qtd_skus"]))
         st.divider()
     else:
         c1, c2 = st.columns(2)

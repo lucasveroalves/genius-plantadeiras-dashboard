@@ -119,9 +119,44 @@ def ler_catalogo_xlsx(file_bytes: bytes) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════
 
 def _ler_senior_xlsx(file_bytes: bytes) -> pd.DataFrame:
-    """Header real na linha 4 (0-indexed)."""
+    """
+    Header real na linha 4 (0-indexed).
+    Tenta openpyxl (.xlsx) primeiro; se falhar, tenta xlrd (.xls legado).
+    Também tenta sem header fixo se o arquivo tiver estrutura diferente.
+    """
     import io
-    return pd.read_excel(io.BytesIO(file_bytes), header=4, engine="openpyxl")
+    buf = io.BytesIO(file_bytes)
+
+    # Tentativa 1: openpyxl padrão (xlsx)
+    try:
+        return pd.read_excel(buf, header=4, engine="openpyxl")
+    except Exception:
+        pass
+
+    # Tentativa 2: xlrd (xls legado ou xlsx com problema de estrutura)
+    try:
+        buf.seek(0)
+        return pd.read_excel(buf, header=4, engine="xlrd")
+    except Exception:
+        pass
+
+    # Tentativa 3: openpyxl sem header fixo — detecta automaticamente
+    try:
+        buf.seek(0)
+        df_raw = pd.read_excel(buf, header=None, engine="openpyxl")
+        # Procura a linha que contém "Serie" ou "Série" ou "Número"
+        for i, row in df_raw.iterrows():
+            vals = [str(v).strip().lower() for v in row.values]
+            if any(k in vals for k in ["serie", "série", "numero", "número", "emissao", "emissão"]):
+                df_raw.columns = df_raw.iloc[i]
+                df_raw = df_raw.iloc[i+1:].reset_index(drop=True)
+                return df_raw
+        # Se não achou cabeçalho, usa linha 4
+        buf.seek(0)
+        df_raw = pd.read_excel(buf, header=4, engine="openpyxl")
+        return df_raw
+    except Exception as e:
+        raise ValueError(f"Não foi possível ler o arquivo. Verifique se é um Excel válido (.xlsx ou .xls). Erro: {e}")
 
 
 def _processar_senior(df: pd.DataFrame, df_catalogo: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -241,6 +276,27 @@ def _processar_senior(df: pd.DataFrame, df_catalogo: pd.DataFrame | None = None)
 
 
 # ══════════════════════════════════════════════════════════════
+# Processamento de planilha de DEVOLUÇÃO
+# ══════════════════════════════════════════════════════════════
+
+def _processar_devolucao(df: pd.DataFrame, df_catalogo=None) -> pd.DataFrame:
+    """
+    Processa planilha de devolução Senior.
+    Mesma estrutura da planilha de venda, mas os valores são negativados
+    para que Fat. Líquido = Bruto - Devolução funcione corretamente.
+    """
+    df_proc = _processar_senior(df, df_catalogo)
+    if df_proc.empty:
+        return df_proc
+    # Negativar valores para representar devolução
+    for col in ["Valor_Total", "Valor_Unitario", "Quantidade"]:
+        if col in df_proc.columns:
+            df_proc[col] = pd.to_numeric(df_proc[col], errors="coerce").fillna(0) * -1
+    df_proc["Tipo"] = "Devolucao"
+    return df_proc
+
+
+# ══════════════════════════════════════════════════════════════
 # Cache e processamento principal
 # ══════════════════════════════════════════════════════════════
 
@@ -250,13 +306,22 @@ def _file_hash(file_bytes: bytes) -> str:
 
 @st.cache_data(show_spinner=False, ttl=300)
 def _processar_bytes(file_hash: str, file_bytes: bytes, file_name: str,
-                     catalogo_hash: str = "", catalogo_bytes: bytes = b"") -> tuple[pd.DataFrame, bool]:
+                     catalogo_hash: str = "", catalogo_bytes: bytes = b"",
+                     tipo: str = "venda") -> tuple[pd.DataFrame, bool]:
+    """
+    tipo = "venda"     → faturamento bruto (valores positivos)
+    tipo = "devolucao" → devoluções (valores negativados automaticamente)
+    """
     try:
         df_cat = None
         if catalogo_bytes:
             df_cat = ler_catalogo_xlsx(catalogo_bytes)
         df_raw = _ler_senior_xlsx(file_bytes)
-        df     = _processar_senior(df_raw, df_cat)
+        if tipo == "devolucao":
+            df = _processar_devolucao(df_raw, df_cat)
+        else:
+            df = _processar_senior(df_raw, df_cat)
+            df["Tipo"] = "Venda"
         if df.empty:
             st.warning(f"⚠️ Nenhum registro encontrado em '{file_name}'.")
             return criar_mock_pecas(), True
@@ -294,25 +359,53 @@ def _ler_pecas_supabase() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def preparar_pecas(_uploaded_file, _catalogo_file=None) -> tuple[pd.DataFrame, bool]:
+def preparar_pecas(_uploaded_file, _catalogo_file=None,
+                   _devolucao_file=None) -> tuple[pd.DataFrame, bool]:
+    """
+    Combina planilha de venda (bruto) + planilha de devolução.
+    Retorna DataFrame com coluna Tipo = Venda | Devolucao.
+    Fat. Líquido = sum(Valor_Total) pois devoluções têm valores negativos.
+    """
+    cat_bytes, cat_hash = b"", ""
+    if _catalogo_file is not None:
+        _catalogo_file.seek(0)
+        cat_bytes = _catalogo_file.read()
+        cat_hash  = _file_hash(cat_bytes)
+
+    df_venda    = pd.DataFrame()
+    df_devolucao = pd.DataFrame()
+    is_mock = True
+
     if _uploaded_file is not None:
         _uploaded_file.seek(0)
         file_bytes = _uploaded_file.read()
         fhash = _file_hash(file_bytes)
-        cat_bytes, cat_hash = b"", ""
-        if _catalogo_file is not None:
-            _catalogo_file.seek(0)
-            cat_bytes = _catalogo_file.read()
-            cat_hash  = _file_hash(cat_bytes)
-        df, is_mock = _processar_bytes(fhash, file_bytes, _uploaded_file.name,
-                                        cat_hash, cat_bytes)
-        if not is_mock:
-            st.session_state["_pecas_df"]   = df
-            st.session_state["_pecas_nome"] = _uploaded_file.name
-        return df, is_mock
+        df_venda, is_mock = _processar_bytes(fhash, file_bytes, _uploaded_file.name,
+                                              cat_hash, cat_bytes, tipo="venda")
 
+    if _devolucao_file is not None:
+        _devolucao_file.seek(0)
+        dev_bytes = _devolucao_file.read()
+        dev_hash  = _file_hash(dev_bytes)
+        df_devolucao, _ = _processar_bytes(dev_hash, dev_bytes, _devolucao_file.name,
+                                            cat_hash, cat_bytes, tipo="devolucao")
+
+    # Combina venda + devolução
+    dfs = [df for df in [df_venda, df_devolucao] if not df.empty]
+    if dfs:
+        df_combined = pd.concat(dfs, ignore_index=True)
+        if "Tipo" not in df_combined.columns:
+            df_combined["Tipo"] = "Venda"
+        if not is_mock:
+            st.session_state["_pecas_df"]   = df_combined
+            st.session_state["_pecas_nome"] = _uploaded_file.name if _uploaded_file else "combinado"
+        return df_combined, is_mock
+
+    # Fallback: Supabase
     df_sb = _ler_pecas_supabase()
     if not df_sb.empty:
+        if "Tipo" not in df_sb.columns:
+            df_sb["Tipo"] = "Venda"
         st.session_state["_pecas_df"]   = df_sb
         st.session_state["_pecas_nome"] = "Supabase"
         st.sidebar.caption(f"📂 Peças: {len(df_sb):,} registros")
@@ -331,28 +424,68 @@ def preparar_pecas(_uploaded_file, _catalogo_file=None) -> tuple[pd.DataFrame, b
 
 def calcular_kpis_pecas(df: pd.DataFrame, df_orc: pd.DataFrame | None = None,
                         data_inicio=None, data_fim=None) -> dict:
-    _zero = {"total_faturado": 0, "total_pedidos": 0,
+    """
+    Retorna KPIs separados por tipo:
+    - fat_bruto:   soma das vendas (Tipo == Venda)
+    - fat_dev:     soma das devoluções (valor absoluto, Tipo == Devolucao)
+    - fat_liquido: bruto - devolução (= sum(Valor_Total) pois dev é negativo)
+    - total_faturado: alias de fat_liquido para compatibilidade
+    """
+    _zero = {"total_faturado": 0, "fat_bruto": 0, "fat_devolucao": 0,
+             "fat_liquido": 0, "total_pedidos": 0,
              "volume_itens": 0, "ticket_medio": 0, "qtd_skus": 0, "em_orcamento": 0}
     if df is None or df.empty:
         return _zero
     col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_"] if c in df.columns), None)
     col_qtd   = next((c for c in ["Quantidade", "Qtde_Fat_"] if c in df.columns), None)
     col_cod   = next((c for c in ["Codigo", "Produto"] if c in df.columns), None)
-    fat  = pd.to_numeric(df[col_valor], errors="coerce").fillna(0).sum() if col_valor else 0.0
-    vol  = pd.to_numeric(df[col_qtd],   errors="coerce").fillna(0).sum() if col_qtd   else 0.0
-    n    = len(df)
+    col_tipo  = "Tipo" if "Tipo" in df.columns else None
+
+    df = df.copy()
+    vals = pd.to_numeric(df[col_valor], errors="coerce").fillna(0) if col_valor else pd.Series([0.0]*len(df))
+
+    if col_tipo:
+        mask_venda = df[col_tipo] == "Venda"
+        mask_dev   = df[col_tipo] == "Devolucao"
+        fat_bruto  = float(vals[mask_venda].sum())
+        fat_dev    = float(abs(vals[mask_dev].sum()))
+    else:
+        fat_bruto  = float(vals[vals >= 0].sum())
+        fat_dev    = float(abs(vals[vals < 0].sum()))
+
+    fat_liquido = fat_bruto - fat_dev
+    vol  = pd.to_numeric(df[col_qtd], errors="coerce").fillna(0).sum() if col_qtd else 0.0
+    n    = len(df[df[col_tipo] == "Venda"]) if col_tipo else len(df)
     skus = df[col_cod].nunique() if col_cod else 0
+
     em_orc = 0.0
     if df_orc is not None and not df_orc.empty and "Status_Orc" in df_orc.columns:
         ag = df_orc[df_orc["Status_Orc"] == "Aguardando"]
         em_orc = pd.to_numeric(ag.get("Valor_Total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-    return {"total_faturado": float(fat), "total_pedidos": int(n), "volume_itens": float(vol),
-            "ticket_medio": float(fat/n) if n > 0 else 0.0, "qtd_skus": int(skus), "em_orcamento": float(em_orc)}
+
+    return {
+        "total_faturado":  fat_liquido,   # compatibilidade
+        "fat_bruto":       fat_bruto,
+        "fat_devolucao":   fat_dev,
+        "fat_liquido":     fat_liquido,
+        "total_pedidos":   int(n),
+        "volume_itens":    float(vol),
+        "ticket_medio":    float(fat_liquido/n) if n > 0 else 0.0,
+        "qtd_skus":        int(skus),
+        "em_orcamento":    float(em_orc),
+    }
 
 
 def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    """ABC baseado no Faturamento Líquido — exclui devoluções isoladamente,
+    usa Valor_Total que já é líquido quando bruto+dev são combinados."""
     _cols = ["Codigo", "Descricao_Peca", "Valor_Total", "Pct", "Pct_Acum", "Curva"]
     if df is None or df.empty:
+        return pd.DataFrame(columns=_cols)
+    # Filtra apenas vendas para ABC (devoluções são negativas mas já embutidas)
+    if "Tipo" in df.columns:
+        df = df[df["Tipo"] == "Venda"].copy()
+    if df.empty:
         return pd.DataFrame(columns=_cols)
     col_cod   = next((c for c in ["Codigo", "Produto"] if c in df.columns), None)
     col_valor = next((c for c in ["Valor_Total", "Vlr_Liq_"] if c in df.columns), None)
@@ -375,6 +508,7 @@ def calcular_curva_abc_por_codigo(df: pd.DataFrame, top_n: int = 20) -> pd.DataF
 
 
 def calcular_top10_revendas(df: pd.DataFrame) -> pd.DataFrame:
+    """Top 10 revendas pelo Faturamento Líquido (bruto - devolução)."""
     if df is None or df.empty:
         return pd.DataFrame(columns=["Cliente_Revenda", "Valor_Total"])
     col_cli = next((c for c in ["Cliente_Revenda", "Cliente"] if c in df.columns), None)
